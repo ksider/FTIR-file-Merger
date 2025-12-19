@@ -4,8 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FTIR Merger</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
   <link rel="stylesheet" href="styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script src="./d3.min.js"></script>
+  <script src="./jcampconverter.min.js"></script>
 </head>
 <body>
   <div class="bg-accent"></div>
@@ -15,7 +17,35 @@
         <img src="logo.png" alt="FTIR Merger logo" class="brand-logo" />
         <div class="brand-copy">
           <p class="eyebrow">Spectra workspace</p>
-          <strong>FTIR Merger</strong>
+          <strong>FTIR viewer</strong>
+        </div>
+      </div>
+      <div class="topbar-form toolbar">
+        <input id="files" type="file" accept=".txt,.jdx,.dx,.jsm,.jcm,text/plain,application/octet-stream" multiple style="display:none;">
+        <input id="importSessionInput" type="file" accept=".json" style="display:none;">
+        <div class="toolbar-group">
+          <button id="selectFiles" class="icon-btn primary" type="button" title="Add files" aria-label="Add files">
+            <span class="material-symbols-outlined">upload_file</span>
+          </button>
+          <button id="exportSession" class="icon-btn" type="button" title="Export session" aria-label="Export session">
+            <span class="material-symbols-outlined">file_download</span>
+          </button>
+          <button id="importSession" class="icon-btn" type="button" title="Import session" aria-label="Import session">
+            <span class="material-symbols-outlined">file_open</span>
+          </button>
+          <button id="copyPng" class="icon-btn" type="button" title="Copy chart PNG" aria-label="Copy chart PNG">
+            <span class="material-symbols-outlined">image</span>
+          </button>
+          <button id="copySvg" class="icon-btn" type="button" title="Copy chart SVG" aria-label="Copy chart SVG">
+            <span class="material-symbols-outlined">code</span>
+          </button>
+          <button id="saveCsv" class="icon-btn success" type="button" title="Save CSV" aria-label="Save CSV">
+            <span class="material-symbols-outlined">save</span>
+          </button>
+        </div>
+        <div class="toolbar-group name-group">
+          <label class="visually-hidden" for="fileName">CSV name</label>
+          <input id="fileName" type="text" class="save-name" value="merged.csv" aria-label="CSV file name">
         </div>
       </div>
       <div class="lang-switch">
@@ -26,48 +56,15 @@
     </header>
 
     <div class="card surface">
-      <div class="form-section">
-        <div>
-          <h1 data-i18n="title">FTIR TXT → CSV</h1>
-          <p class="muted" data-i18n="description">Select multiple .txt files (FTIR spectra), set file name, merge to CSV, save a copy, and view the chart.</p>
-        </div>
-      </div>
-
-      <div class="input-grid">
-        <div class="field">
-          <label for="files" data-i18n="filesLabel">Files (.txt):</label>
-          <input id="files" type="file" accept=".txt" multiple>
-          <p class="helper">Multi-select supported. Each column will match the file name.</p>
-        </div>
-
-        <div class="field">
-          <label for="sampleIndex" data-i18n="sampleIndex">Sample index (optional):</label>
-          <input id="sampleIndex" type="text" placeholder="e.g. A1">
-        </div>
-
-        <div class="field">
-          <label for="fileName" data-i18n="fileName">Output file name (.csv):</label>
-          <input id="fileName" type="text" value="merged.csv">
-        </div>
-      </div>
-
-      <div class="toggles">
-        <label class="toggle">
-          <input id="autoDownload" type="checkbox" checked>
-          <span class="slider"></span>
-          <span class="toggle-label" data-i18n="autoDownload">Auto-download:</span>
-        </label>
-      </div>
-
-      <div class="actions">
-        <button id="mergeBtn" class="btn primary" data-i18n="mergeBtn">Merge</button>
+      <div class="inline-row inline-row--sub">
+        <p class="helper">Multi-select supported. Each column will match the file name.</p>
         <div class="status-block">
           <div id="status"></div>
           <div id="downloadLink"></div>
         </div>
       </div>
 
-      <div class="chart-row" id="chartRow" style="display:none;">
+      <div class="chart-row is-hidden" id="chartRow">
         <div>
           <div id="zoneHint" class="zone-hint"></div>
           <div id="chart"></div>
@@ -92,628 +89,69 @@
                 <input id="yMax" type="number" step="0.1" placeholder="auto" disabled>
               </div>
             </div>
+            <div class="control-group baseline-group">
+              <label data-i18n="baselineSection">Baseline fit</label>
+              <div class="baseline-controls">
+                <select id="baselineSeries"></select>
+                <input id="baselineDegree" type="number" min="1" max="6" step="1" value="2">
+                <button id="baselinePreview" type="button" class="btn tonal" disabled data-i18n="baselinePreview">Preview</button>
+                <button id="baselineApply" type="button" class="btn tonal" disabled data-i18n="baselineApply">Apply</button>
+                <button id="baselineRevert" type="button" class="btn tonal" disabled data-i18n="baselineRevert">Revert</button>
+              </div>
+            </div>
             <div class="control-actions">
-              <button id="refreshChart" type="button" class="btn tonal" disabled data-i18n="refresh">Refresh chart</button>
-              <button id="saveCsv" type="button" class="btn success" disabled data-i18n="saveCsv">Save CSV</button>
+              <button id="refreshChart" type="button" class="icon-btn" disabled title="Refresh chart" aria-label="Refresh chart">
+                <span class="material-symbols-outlined">refresh</span>
+              </button>
+              <button id="resetZoom" type="button" class="icon-btn" disabled title="Reset zoom" aria-label="Reset zoom">
+                <span class="material-symbols-outlined">zoom_out_map</span>
+              </button>
+              <div class="save-wrap">
+                <input id="fileName" type="text" class="save-name" value="merged.csv" aria-label="CSV file name">
+                <button id="saveCsv" type="button" class="btn success" disabled data-i18n="saveCsv">Save CSV</button>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </div>
+
+    <div class="card surface peaks-card">
+      <div class="peaks-header">
+        <h3 data-i18n="peaksTitle">Peaks / stripes</h3>
+        <div class="peaks-actions">
+          <button id="addStripe" type="button" class="btn tonal" data-i18n="addStripe">Add stripe</button>
+          <button id="copyStripes" type="button" class="btn tonal" data-i18n="copyStripes">Copy table</button>
+          <p class="peaks-hint" data-i18n="peakHint">Click the chart to place a marker, then add it here.</p>
+        </div>
+      </div>
+      <div class="peaks-table">
+        <div class="stripe-sets">
+          <button class="stripe-set-btn active" data-set="candidates">Candidates</button>
+          <button class="stripe-set-btn" data-set="confirmed">Confirmed</button>
+        </div>
+        <div class="peaks-row peaks-head">
+          <span> </span>
+          <span data-i18n="colWave">Wavenumber</span>
+          <span data-i18n="colLabel">Label</span>
+          <span data-i18n="colTip">Tip</span>
+          <span> </span>
+        </div>
+        <div id="peaksEmpty" class="peaks-empty" data-i18n="peaksEmpty">No stripes yet. Set a marker and add it here.</div>
+        <div id="peaksBody" class="peaks-body"></div>
+      </div>
+    </div>
+    <footer class="footer surface">
+      <div class="footer-links">
+        <a id="footerSite" href="#" rel="noopener" target="_blank">nikolaysemenov.ru</a>
+        <span class="dot">•</span>
+        <a id="footerGithub" href="#" rel="noopener" target="_blank">GitHub</a>
+      </div>
+    </footer>
   </div>
 
-  <script>
-    const fileInput = document.getElementById('files');
-    const mergeBtn = document.getElementById('mergeBtn');
-    const statusEl = document.getElementById('status');
-    const chartEl = document.getElementById('chart');
-    const sampleInput = document.getElementById('sampleIndex');
-    const fileNameInput = document.getElementById('fileName');
-    const autoDownloadInput = document.getElementById('autoDownload');
-    const downloadLinkEl = document.getElementById('downloadLink');
-    const refreshBtn = document.getElementById('refreshChart');
-    const xMinInput = document.getElementById('xMin');
-    const xMaxInput = document.getElementById('xMax');
-    const yMinInput = document.getElementById('yMin');
-    const yMaxInput = document.getElementById('yMax');
-    const saveCsvBtn = document.getElementById('saveCsv');
-    const chartRow = document.getElementById('chartRow');
-    const chartLegend = document.getElementById('chartLegend');
-    const i18nTargets = document.querySelectorAll('[data-i18n]');
-    const langLinks = document.querySelectorAll('.lang-link');
-
-    const translations = {
-      en: {
-        title: 'FTIR TXT → CSV',
-        description: 'Select multiple .txt files (FTIR spectra), set file name, merge to CSV, save a copy, and view the chart.',
-        filesLabel: 'Files (.txt):',
-        sampleIndex: 'Sample index (optional):',
-        fileName: 'Output file name (.csv):',
-        autoDownload: 'Auto-download:',
-        mergeBtn: 'Merge',
-        chartSettings: 'Chart settings',
-        xRange: 'X range (reverse):',
-        yRange: 'Y range:',
-        offsetsLabel: 'Y offsets per curve:',
-        refresh: 'Refresh chart',
-        saveCsv: 'Save CSV',
-        statusNoFiles: 'Add at least one file.',
-        statusReading: 'Reading files...',
-        statusSending: 'Merging...',
-        statusDoneDownload: 'Done! CSV downloaded. Drawing chart...',
-        statusDoneLink: 'Done! Download link ready. Drawing chart...',
-        statusSaved: (p) => `Saved: ${p}`,
-        statusSaveCanceled: 'Save canceled.',
-        statusNoDataCols: 'No data columns found (only wavenumber?)',
-        statusNoNumeric: 'No numeric data to plot.',
-        language: 'Language:',
-      },
-      ru: {
-        title: 'FTIR TXT → CSV',
-        description: 'Выберите несколько .txt файлов (спектры ФТИР), задайте имя, объедините, сохраните копию и смотрите график.',
-        filesLabel: 'Файлы (.txt):',
-        sampleIndex: 'Индекс образца (опционально):',
-        fileName: 'Имя итогового файла (.csv):',
-        autoDownload: 'Автоскачивание:',
-        mergeBtn: 'Объединить',
-        chartSettings: 'Настройки диаграммы',
-        xRange: 'Диапазон X (реверс):',
-        yRange: 'Диапазон Y:',
-        offsetsLabel: 'Смещения по Y для кривых:',
-        refresh: 'Обновить график',
-        saveCsv: 'Сохранить CSV',
-        statusNoFiles: 'Добавьте хотя бы один файл.',
-        statusReading: 'Чтение файлов...',
-        statusSending: 'Объединение...',
-        statusDoneDownload: 'Готово! CSV скачан. Рисую график...',
-        statusDoneLink: 'Готово! Ссылка готова. Рисую график...',
-        statusSaved: (p) => `Сохранено: ${p}`,
-        statusSaveCanceled: 'Сохранение отменено.',
-        statusNoDataCols: 'Не удалось найти столбцы данных (только wavenumber?)',
-        statusNoNumeric: 'Нет числовых данных для построения графика.',
-        language: 'Язык:',
-        yAuto: 'auto',
-      },
-      sr: {
-        title: 'FTIR TXT → CSV',
-        description: 'Izaberite više .txt fajlova (FTIR spektri), unesite ime, spojite u CSV, sačuvajte kopiju i pogledajte graf.',
-        filesLabel: 'Fajlovi (.txt):',
-        sampleIndex: 'Indeks uzorka (opciono):',
-        fileName: 'Naziv izlaznog fajla (.csv):',
-        autoDownload: 'Auto preuzimanje:',
-        mergeBtn: 'Spoji',
-        chartSettings: 'Podešavanja grafa',
-        xRange: 'Opseg X (obrnuto):',
-        yRange: 'Opseg Y:',
-        offsetsLabel: 'Pomeraj po Y za krive:',
-        refresh: 'Osveži graf',
-        saveCsv: 'Sačuvaj CSV',
-        statusNoFiles: 'Dodajte bar jedan fajl.',
-        statusReading: 'Čitanje fajlova...',
-        statusSending: 'Spajanje...',
-        statusDoneDownload: 'Gotovo! CSV preuzet. Crtam graf...',
-        statusDoneLink: 'Gotovo! Link spreman. Crtam graf...',
-        statusSaved: (p) => `Sačuvano: ${p}`,
-        statusSaveCanceled: 'Čuvanje otkazano.',
-        statusNoDataCols: 'Nema kolona sa podacima (samo wavenumber?)',
-        statusNoNumeric: 'Nema numeričkih podataka za graf.',
-        language: 'Jezik:',
-        yAuto: 'auto',
-      },
-    };
-
-    const browserLang = ((navigator.language || 'en').slice(0, 2) || 'en').toLowerCase();
-    let currentLang = ['ru', 'sr'].includes(browserLang) ? browserLang : 'en';
-
-    function t(key, arg) {
-      const dict = translations[currentLang] || translations.en;
-      const val = dict[key];
-      return typeof val === 'function' ? val(arg) : (val || translations.en[key] || key);
-    }
-
-    function applyTranslations() {
-      i18nTargets.forEach((el) => {
-        const key = el.getAttribute('data-i18n');
-        if (key) el.textContent = t(key);
-      });
-      sampleInput.placeholder = currentLang === 'ru' ? 'например, A1' : currentLang === 'sr' ? 'npr. A1' : 'e.g. A1';
-      yMinInput.placeholder = t('yAuto') || 'auto';
-      yMaxInput.placeholder = t('yAuto') || 'auto';
-      langLinks.forEach((link) => {
-        link.classList.toggle('active', link.dataset.lang === currentLang);
-      });
-      document.documentElement.lang = currentLang;
-    }
-
-    function setLanguage(lang) {
-      currentLang = ['en', 'ru', 'sr'].includes(lang) ? lang : 'en';
-      applyTranslations();
-    }
-
-    langLinks.forEach((link) => {
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
-        setLanguage(link.dataset.lang);
-      });
-    });
-    applyTranslations();
-
-    let lastData = null; // [{file, x, y}]
-    let offsets = new Map(); // file -> offset
-    let lastCsvText = '';
-    let visibleSeries = new Map(); // file -> boolean
-    let markerActive = false;
-    let markerX = null;
-    let markerUpdater = null;
-    let markerStep = 1;
-
-    function setStatus(msg, isError = false) {
-      statusEl.textContent = msg;
-      statusEl.style.color = isError ? '#b91c1c' : '#0f172a';
-    }
-
-    function readFileText(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(reader.error);
-        reader.readAsText(file);
-      });
-    }
-
-    function generateName() {
-      const files = Array.from(fileInput.files || []);
-      const count = files.length;
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
-      const sample = (sampleInput.value || '').trim();
-      const base = `ftir_${date}_${count || 0}files${sample ? `_${sample}` : ''}`;
-      const withExt = base.toLowerCase().endsWith('.csv') ? base : `${base}.csv`;
-      fileNameInput.value = withExt;
-    }
-
-    fileInput.addEventListener('change', generateName);
-    sampleInput.addEventListener('input', generateName);
-    generateName();
-
-    function renderChartFromData(data) {
-      if (!window.d3) return;
-      const filtered = data.filter((d) => typeof d.x === 'number' && typeof d.y === 'number' && d.x <= 4000 && d.x >= 500);
-      if (!filtered.length) {
-        chartEl.innerHTML = '<p>No data in 4000–500.</p>';
-        chartLegend.innerHTML = '';
-        return;
-      }
-
-      const allSeries = Array.from(new Set(filtered.map((d) => d.file)));
-
-      // apply visibility
-      const filteredVisible = filtered.filter((d) => visibleSeries.get(d.file) !== false);
-      const byFile = d3.group(filteredVisible, (d) => d.file);
-      const yDomainAuto = d3.extent(filtered, (d) => d.y);
-      const xMaxVal = Number(xMaxInput.value) || 4000;
-      const xMinVal = Number(xMinInput.value) || 500;
-      const yMinVal = yMinInput.value === '' ? yDomainAuto[0] : Number(yMinInput.value);
-      const yMaxVal = yMaxInput.value === '' ? yDomainAuto[1] : Number(yMaxInput.value);
-      const margin = { top: 20, right: 20, bottom: 40, left: 60 };
-      const width = chartEl.clientWidth || 800;
-      const height = 420;
-      const innerW = width - margin.left - margin.right;
-      const innerH = height - margin.top - margin.bottom;
-
-      const x = d3.scaleLinear().domain([xMaxVal, xMinVal]).range([0, innerW]);
-      const y = d3.scaleLinear().domain([yMinVal, yMaxVal]).nice().range([innerH, 0]);
-      const domainSpan = Math.abs(xMaxVal - xMinVal) || 1;
-      const arrowStep = domainSpan / 200;
-      markerStep = arrowStep;
-      const clampX = (val) => Math.min(Math.max(val, Math.min(xMaxVal, xMinVal)), Math.max(xMaxVal, xMinVal));
-
-      const line = d3.line()
-        .x((d) => x(d.x))
-        .y((d) => y(d.y))
-        .defined((d) => Number.isFinite(d.x) && Number.isFinite(d.y))
-        .curve(d3.curveLinear);
-
-      const svg = d3.create('svg').attr('viewBox', `0 0 ${width} ${height}`);
-      const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
-
-      const zones = [
-        { label: 'X–H heteroatoms', start: 4000, end: 2500, color: '#fb923c' },
-        { label: 'C–H', start: 3100, end: 2800, color: '#fde047', text: '#111827' },
-        { label: 'C≡C / C≡N', start: 2300, end: 2100, color: '#86efac', text: '#065f46' },
-        { label: 'C=O', start: 1850, end: 1650, color: '#fb923c' },
-        { label: 'C=C', start: 1650, end: 1500, color: '#86efac', text: '#065f46' },
-        { label: 'halogenated', start: 1400, end: 1000, color: '#86efac', text: '#065f46' },
-        { label: 'ethers', start: 1300, end: 1100, color: '#38bdf8', text: '#0b213b' },
-        { label: 'organometallic', start: 1100, end: 700, color: '#fde047', text: '#111827' },
-      ];
-
-      const zoneHintEl = document.getElementById('zoneHint');
-      const zoneLayer = g.append('g').attr('class', 'zones');
-      const zoneRects = [];
-      zones.forEach((zone) => {
-        const x1 = x(zone.start);
-        const x2 = x(zone.end);
-        const left = Math.min(x1, x2);
-        const width = Math.abs(x2 - x1);
-        if (width <= 0) return;
-        const zoneGroup = zoneLayer.append('g');
-        const rect = zoneGroup.append('rect')
-          .attr('x', left)
-          .attr('y', 0)
-          .attr('width', width)
-          .attr('height', innerH)
-          .attr('fill', 'transparent')
-          .attr('stroke', 'none')
-          .attr('rx', 4)
-          .attr('ry', 4)
-          .style('pointer-events', 'none');
-        zoneRects.push({ rect, zone });
-      });
-
-      g.append('g')
-        .attr('transform', `translate(0,${innerH})`)
-        .call(d3.axisBottom(x));
-      g.append('g')
-        .call(d3.axisLeft(y));
-
-      const color = d3.scaleOrdinal(d3.schemeTableau10).domain(allSeries);
-      const allPoints = [];
-
-      const seriesData = new Map();
-      for (const [file, rows] of byFile) {
-        const offset = offsets.get(file) || 0;
-        const sorted = rows.slice().sort((a, b) => b.x - a.x).map((d) => ({ ...d, y: d.y + offset, file }));
-        g.append('path')
-          .datum(sorted)
-          .attr('fill', 'none')
-          .attr('stroke', color(file))
-          .attr('stroke-width', 1.5)
-          .attr('d', line);
-        allPoints.push(...sorted);
-        seriesData.set(file, sorted);
-      }
-
-      // HTML legend with offsets
-      chartLegend.innerHTML = '';
-      for (const file of allSeries) {
-        const item = document.createElement('div');
-        item.className = 'legend-item';
-        if (visibleSeries.get(file) === false) item.classList.add('inactive');
-        const swatch = document.createElement('div');
-        swatch.className = 'legend-swatch';
-        swatch.style.background = color(file);
-        const label = document.createElement('span');
-        label.textContent = file;
-        const offsetInput = document.createElement('input');
-        offsetInput.type = 'number';
-        offsetInput.step = '0.1';
-        offsetInput.value = offsets.get(file) || 0;
-        offsetInput.className = 'legend-offset';
-        offsetInput.addEventListener('click', (e) => e.stopPropagation());
-        offsetInput.addEventListener('input', () => {
-          offsets.set(file, Number(offsetInput.value) || 0);
-          renderChartFromData(lastData);
-        });
-        item.appendChild(swatch);
-        item.appendChild(label);
-        item.appendChild(offsetInput);
-        item.addEventListener('click', () => {
-          const current = visibleSeries.get(file);
-          visibleSeries.set(file, current === false ? true : false);
-          renderChartFromData(lastData);
-        });
-        chartLegend.appendChild(item);
-      }
-
-      const marker = g.append('g').style('display', 'none');
-      const markerLine = marker.append('line')
-        .attr('y1', 0)
-        .attr('y2', innerH)
-        .attr('stroke', '#1f2937')
-        .attr('stroke-width', 1.4)
-        .attr('stroke-dasharray', '4,4');
-      const markerDots = marker.append('g');
-      const markerText = marker.append('text')
-        .attr('font-size', 12)
-        .attr('y', -6)
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#1f2937')
-        .attr('font-weight', '600')
-        .style('user-select', 'none');
-
-      const applyMarker = (xVal) => {
-        const clamped = clampX(xVal);
-        markerActive = true;
-        markerX = clamped;
-        marker.style('display', 'block');
-        markerLine
-          .attr('x1', x(clamped))
-          .attr('x2', x(clamped));
-        markerDots.selectAll('circle').remove();
-        seriesData.forEach((rows, file) => {
-          let nearest = null;
-          let bestDx = Infinity;
-          for (const point of rows) {
-            const dx = Math.abs(point.x - clamped);
-            if (dx < bestDx) {
-              bestDx = dx;
-              nearest = point;
-            }
-          }
-          if (!nearest) return;
-          markerDots.append('circle')
-            .attr('cx', x(nearest.x))
-            .attr('cy', y(nearest.y))
-            .attr('r', 4)
-            .attr('fill', color(file))
-            .attr('stroke', '#fff')
-            .attr('stroke-width', 1.2);
-        });
-        markerText
-          .attr('x', x(clamped))
-          .text(`x = ${clamped.toFixed(2)}`);
-        svg.style('cursor', 'col-resize');
-        setStatus(`x=${clamped.toFixed(2)}`);
-      };
-
-      const clearZoneHighlight = () => {
-        zoneRects.forEach(({ rect }) => rect.attr('fill', 'transparent'));
-        if (zoneHintEl) zoneHintEl.textContent = '\u00A0';
-      };
-
-      const updateZoneHighlight = (xVal) => {
-        let active = null;
-        const val = Number(xVal);
-        zoneRects.forEach(({ rect, zone }) => {
-          const min = Math.min(zone.start, zone.end);
-          const max = Math.max(zone.start, zone.end);
-          const inZone = val <= max && val >= min;
-          rect.attr('fill', inZone ? d3.color(zone.color).copy({ opacity: 0.18 }) : 'transparent');
-          if (inZone) active = zone;
-        });
-        if (zoneHintEl) zoneHintEl.textContent = active ? `${active.label} (${active.end}–${active.start} cm⁻¹)` : '\u00A0';
-      };
-
-      let isDragging = false;
-      svg.style('cursor', markerActive ? 'col-resize' : 'crosshair');
-
-      const handlePointer = (event) => {
-        const [px, py] = d3.pointer(event, g.node());
-        if (px < 0 || px > innerW || py < 0 || py > innerH) return;
-        const xVal = x.invert(px);
-        applyMarker(xVal);
-        updateZoneHighlight(xVal);
-      };
-
-      const handleHover = (event) => {
-        const [px, py] = d3.pointer(event, g.node());
-        if (px < 0 || px > innerW || py < 0 || py > innerH) {
-          clearZoneHighlight();
-          return;
-        }
-        const xVal = x.invert(px);
-        updateZoneHighlight(xVal);
-      };
-
-      svg.on('pointerdown', (event) => {
-        handlePointer(event);
-        isDragging = true;
-      });
-      svg.on('pointermove', (event) => {
-        if (isDragging) {
-          handlePointer(event);
-        } else {
-          handleHover(event);
-        }
-      });
-      svg.on('pointerup pointerleave pointercancel', () => {
-        isDragging = false;
-        svg.style('cursor', markerActive ? 'col-resize' : 'crosshair');
-        clearZoneHighlight();
-      });
-
-      svg.on('click', (event) => {
-        handlePointer(event);
-      });
-
-      markerUpdater = (direction) => {
-        if (!markerActive || markerX === null) return;
-        const delta = typeof direction === 'number' ? direction : 0;
-        applyMarker(markerX + delta);
-      };
-
-      if (markerActive && markerX !== null) {
-        applyMarker(markerX);
-      }
-      clearZoneHighlight();
-
-      chartEl.innerHTML = '';
-      chartEl.appendChild(svg.node());
-    }
-
-    function setControlsEnabled(enabled) {
-      refreshBtn.disabled = !enabled;
-      saveCsvBtn.disabled = !enabled;
-      xMinInput.disabled = !enabled;
-      xMaxInput.disabled = !enabled;
-      yMinInput.disabled = !enabled;
-      yMaxInput.disabled = !enabled;
-      chartRow.style.display = enabled ? 'grid' : 'none';
-      document.getElementById('chartControls').classList.toggle('active', enabled);
-      if (enabled) {
-        xMaxInput.value = '4000';
-        xMinInput.value = '500';
-        yMinInput.value = '';
-        yMaxInput.value = '';
-        yMinInput.placeholder = t('yAuto') || 'auto';
-        yMaxInput.placeholder = t('yAuto') || 'auto';
-        visibleSeries = new Map();
-      }
-    }
-
-    refreshBtn.addEventListener('click', () => {
-      if (lastData) {
-        renderChartFromData(lastData);
-      }
-    });
-    xMinInput.addEventListener('input', () => lastData && renderChartFromData(lastData));
-    xMaxInput.addEventListener('input', () => lastData && renderChartFromData(lastData));
-    yMinInput.addEventListener('input', () => lastData && renderChartFromData(lastData));
-    yMaxInput.addEventListener('input', () => lastData && renderChartFromData(lastData));
-
-    saveCsvBtn.addEventListener('click', async () => {
-      if (!lastCsvText) return;
-      const defaultName = fileNameInput.value.trim() || 'merged.csv';
-      const blob = new Blob([lastCsvText], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = defaultName.toLowerCase().endsWith('.csv') ? defaultName : `${defaultName}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      setStatus(t('statusSaved')(defaultName));
-    });
-
-    mergeBtn.addEventListener('click', async () => {
-      const files = Array.from(fileInput.files || []);
-      if (!files.length) {
-        setStatus(t('statusNoFiles'), true);
-        return;
-      }
-      mergeBtn.disabled = true;
-      setStatus(t('statusReading'));
-      try {
-        const payloadFiles = [];
-        for (const f of files) {
-          const content = await readFileText(f);
-          payloadFiles.push({ name: f.name, content });
-        }
-        const downloadName = fileNameInput.value.trim() || 'merged.csv';
-
-        // Local merge to wavenumber + per-file columns
-        const parseInfraredText = (text) => {
-          const rows = [];
-          const lines = text.split(/\r?\n/);
-          for (const raw of lines) {
-            const line = raw.trim();
-            if (!line) continue;
-            const parts = line.split(/\s+/);
-            if (parts.length >= 2 && !Number.isNaN(Number(parts[0])) && !Number.isNaN(Number(parts[1]))) {
-              rows.push([Number(parts[0]), Number(parts[1])]);
-            }
-          }
-          return rows;
-        };
-
-        const columns = payloadFiles.map((f) => f.name.replace(/[^a-zA-Z0-9_\-]+/g, '_') || 'col');
-        const table = new Map();
-        let totalRows = 0;
-        payloadFiles.forEach((file, idx) => {
-          const col = columns[idx];
-          const rows = parseInfraredText(file.content);
-          totalRows += rows.length;
-          for (const [x, y] of rows) {
-            const key = String(x);
-            if (!table.has(key)) table.set(key, { x: Number(x), vals: new Map() });
-            table.get(key).vals.set(col, y);
-          }
-        });
-
-        const header = ['wavenumber', ...columns];
-        const sorted = Array.from(table.values()).sort((a, b) => b.x - a.x);
-        const lines = [header.join(',')];
-        for (const row of sorted) {
-          lines.push([
-            row.x,
-            ...columns.map((c) => (row.vals.has(c) ? row.vals.get(c) : '')),
-          ].join(','));
-        }
-
-        const csvText = lines.join('\n');
-        lastCsvText = csvText;
-        setStatus(`${t('statusSending')} ${payloadFiles.length} files, ${totalRows} points...`);
-
-        const parsed = d3.csvParse(csvText, d3.autoType);
-        const cols = parsed.columns.map((c) => c.trim()).filter((c) => c && c !== 'wavenumber');
-        if (!cols.length) {
-          setStatus(t('statusNoDataCols'), true);
-          return;
-        }
-        const series = [];
-        for (const col of cols) {
-          for (const row of parsed) {
-            if (typeof row[col] === 'number' && typeof row.wavenumber === 'number') {
-              series.push({ file: col, x: row.wavenumber, y: row[col] });
-            }
-          }
-        }
-        if (!series.length) {
-          setStatus(t('statusNoNumeric'), true);
-          return;
-        }
-        lastData = series;
-        offsets = new Map();
-        cols.forEach((col) => offsets.set(col, 0));
-        if (!visibleSeries.size) {
-          cols.forEach((col) => visibleSeries.set(col, true));
-        }
-        const finalName = downloadName.toLowerCase().endsWith('.csv') ? downloadName : `${downloadName}.csv`;
-        if (autoDownloadInput.checked) {
-          const blob = new Blob([csvText], { type: 'text/csv' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = finalName;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          URL.revokeObjectURL(url);
-          setStatus(t('statusDoneDownload'));
-        } else {
-          downloadLinkEl.innerHTML = '';
-          const a = document.createElement('a');
-          a.href = '#';
-          a.textContent = `${finalName}`;
-          a.addEventListener('click', (e) => {
-            e.preventDefault();
-            const blob = new Blob([csvText], { type: 'text/csv' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = finalName;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-            URL.revokeObjectURL(url);
-          });
-          downloadLinkEl.appendChild(a);
-          setStatus(t('statusDoneLink'));
-        }
-
-        setControlsEnabled(true);
-        renderChartFromData(lastData);
-      } catch (err) {
-        console.error(err);
-        setStatus(err.message, true);
-      } finally {
-        mergeBtn.disabled = false;
-      }
-    });
-
-    document.addEventListener('keydown', (event) => {
-      if (!markerUpdater || !markerActive) return;
-      const key = event.key;
-      if (key === 'ArrowLeft' || key === 'ArrowRight') {
-        event.preventDefault();
-        const step = event.shiftKey ? markerStep * 5 : markerStep;
-        const direction = key === 'ArrowLeft' ? -step : step;
-        markerUpdater(direction);
-      }
-    });
-  </script>
+  <script src="./config.js"></script>
+  <script src="./peak-db.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>

@@ -2,11 +2,13 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const MAX_BODY = 20 * 1024 * 1024; // 20MB safety limit
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const GENERATED_DIR = path.join(__dirname, 'generated');
+const SESSIONS_DIR = path.join(GENERATED_DIR, 'sessions');
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -79,8 +81,13 @@ function mergeFiles(files) {
   return { csv: lines.join('\n'), totalRows };
 }
 
-function serveStatic(req, res) {
-  const urlPath = req.url === '/' ? '/index.html' : req.url;
+function sendJson(res, status, payload) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(payload));
+}
+
+function serveStatic(pathname, res) {
+  const urlPath = pathname === '/' ? '/index.html' : pathname;
   const safePath = path.normalize(urlPath).replace(/^(\.\.[\\/])+/, '');
   const filePath = path.join(PUBLIC_DIR, safePath);
   if (!filePath.startsWith(PUBLIC_DIR)) {
@@ -101,57 +108,126 @@ function serveStatic(req, res) {
         ? 'application/javascript; charset=utf-8'
         : ext === '.css'
           ? 'text/css; charset=utf-8'
+          : ext === '.csv'
+            ? 'text/csv; charset=utf-8'
           : 'text/plain; charset=utf-8';
     res.writeHead(200, { 'Content-Type': type });
     res.end(data);
   });
 }
 
-const server = http.createServer((req, res) => {
-  if (req.method === 'POST' && req.url === '/merge') {
-    let body = '';
-    req.on('data', (chunk) => {
-      body += chunk;
-      if (body.length > MAX_BODY) {
-        res.writeHead(413);
-        res.end('Payload too large');
-        req.destroy();
-      }
+function parseJsonBody(req, res, onComplete) {
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > MAX_BODY) {
+      res.writeHead(413);
+      res.end('Payload too large');
+      req.destroy();
+    }
+  });
+  req.on('end', () => {
+    try {
+      const payload = JSON.parse(body || '{}');
+      onComplete(payload);
+    } catch (err) {
+      sendJson(res, 400, { error: 'Invalid JSON' });
+    }
+  });
+}
+
+function handleMergeRequest(payload, res, { asDownload = false } = {}) {
+  if (!payload || !Array.isArray(payload.files)) {
+    sendJson(res, 400, { error: 'Invalid payload' });
+    return;
+  }
+  const files = payload.files.map((f) => ({
+    name: f.name || 'unknown',
+    content: f.content || '',
+  }));
+  const requestedName = typeof payload.name === 'string' ? payload.name : 'merged';
+  const safeName = safeFileName(requestedName);
+  const fileName = safeName.toLowerCase().endsWith('.csv') ? safeName : `${safeName}.csv`;
+  const { csv, totalRows } = mergeFiles(files);
+  ensureDir(GENERATED_DIR);
+  fs.writeFileSync(path.join(GENERATED_DIR, fileName), csv, 'utf8');
+
+  if (asDownload) {
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${fileName}"`,
+      'X-Total-Rows': String(totalRows),
     });
-    req.on('end', () => {
+    res.end(csv);
+    return;
+  }
+
+  sendJson(res, 200, { fileName, totalRows, csvPath: `/generated/${fileName}` });
+}
+
+function saveSession(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid session payload');
+  }
+  const id = crypto.randomUUID();
+  ensureDir(SESSIONS_DIR);
+  const sessionFile = path.join(SESSIONS_DIR, `${id}.json`);
+  const record = {
+    id,
+    savedAt: new Date().toISOString(),
+    name: typeof payload.name === 'string' ? payload.name : undefined,
+    data: payload.data ?? payload,
+  };
+  fs.writeFileSync(sessionFile, JSON.stringify(record, null, 2), 'utf8');
+  return record;
+}
+
+function loadSession(id) {
+  if (!id || typeof id !== 'string') return null;
+  const sessionFile = path.join(SESSIONS_DIR, `${id}.json`);
+  if (!sessionFile.startsWith(SESSIONS_DIR) || !fs.existsSync(sessionFile)) return null;
+  const raw = fs.readFileSync(sessionFile, 'utf8');
+  return JSON.parse(raw);
+}
+
+const server = http.createServer((req, res) => {
+  const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const reqPath = parsedUrl.pathname || '/';
+  if (req.method === 'POST' && reqPath === '/merge') {
+    parseJsonBody(req, res, (payload) => handleMergeRequest(payload, res, { asDownload: true }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/merge') {
+    parseJsonBody(req, res, (payload) => handleMergeRequest(payload, res, { asDownload: false }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/sessions') {
+    parseJsonBody(req, res, (payload) => {
       try {
-        const payload = JSON.parse(body);
-        if (!payload || !Array.isArray(payload.files)) {
-          res.writeHead(400);
-          res.end('Invalid payload');
-          return;
-        }
-        const files = payload.files.map((f) => ({
-          name: f.name || 'unknown',
-          content: f.content || '',
-        }));
-        const requestedName = typeof payload.name === 'string' ? payload.name : 'merged';
-        const safeName = safeFileName(requestedName);
-        const fileName = safeName.toLowerCase().endsWith('.csv') ? safeName : `${safeName}.csv`;
-        const { csv, totalRows } = mergeFiles(files);
-        ensureDir(GENERATED_DIR);
-        fs.writeFileSync(path.join(GENERATED_DIR, fileName), csv, 'utf8');
-        res.writeHead(200, {
-          'Content-Type': 'text/csv; charset=utf-8',
-          'Content-Disposition': `attachment; filename="${fileName}"`,
-          'X-Total-Rows': String(totalRows),
-        });
-        res.end(csv);
+        const record = saveSession(payload);
+        sendJson(res, 201, { id: record.id, savedAt: record.savedAt });
       } catch (err) {
-        res.writeHead(400);
-        res.end('Invalid JSON');
+        sendJson(res, 400, { error: err.message });
       }
     });
     return;
   }
 
-  if (req.method === 'GET' && req.url.startsWith('/generated/')) {
-    const rel = req.url.replace('/generated/', '');
+  if (req.method === 'GET' && reqPath.startsWith('/api/sessions/')) {
+    const id = reqPath.replace('/api/sessions/', '').trim();
+    const record = loadSession(id);
+    if (!record) {
+      sendJson(res, 404, { error: 'Not found' });
+      return;
+    }
+    sendJson(res, 200, record);
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath.startsWith('/generated/')) {
+    const rel = reqPath.replace('/generated/', '');
     const safeName = path.normalize(rel).replace(/^(\.\.[\\/])+/, '');
     const filePath = path.join(GENERATED_DIR, safeName);
     if (!filePath.startsWith(GENERATED_DIR) || !fs.existsSync(filePath)) {
@@ -165,7 +241,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET') {
-    serveStatic(req, res);
+    serveStatic(reqPath, res);
     return;
   }
 

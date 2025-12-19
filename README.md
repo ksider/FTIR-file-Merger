@@ -1,10 +1,10 @@
 # FTIR TXT → CSV Merger
 
-This repo has two main ways to run, plus an optional offline app:
+This repo now ships the full offline viewer as a Node-served app and keeps the original offline build untouched for reference.
 
-- **Web app** (server + browser): `server.js` serves static files and handles `/merge` (builds CSV, saves a copy to `generated/`). UI supports multi-file upload, auto file-name generation, auto-download toggle, chart with clickable legend and per-series Y offsets, axis settings, and language switcher.
+- **Node web app**: `server.js` hosts the FTIR viewer from `public/` (copied from `offline/`) and exposes APIs for merging and persisting sessions.
 - **CLI**: `convert.js` merges all `.txt` in a folder into `wavenumber` + one column per file.
-- **(Optional) Electron**: offline app in `electron-app/`; ignore if not needed.
+- **Legacy offline**: unchanged copy in `offline/` if you want to open the app directly from disk.
 
 ## Requirements
 Node.js 18+
@@ -15,12 +15,22 @@ node server.js
 ```
 Open http://localhost:3000
 
-UI features:
-- Multi-select `.txt`, auto-generate output name.
-- “Auto-download” checkbox: if on, CSV downloads immediately; if off, a download link appears.
-- Chart: legend below the chart is clickable (toggle series), each item has a Y-offset field; X/Y ranges are configurable (X reversed 4000→500).
-- Languages: EN/RU/SR (switch in header).
-- Server saves a copy to `generated/<name>.csv`.
+UI features (from the offline app):
+- Multi-select FTIR files (.txt, JCAMP variants), per-series visibility + Y offsets, baseline preview, stripes/peaks table, PNG/SVG copy, session export/import.
+- Configurable X/Y ranges with zone highlights; EN/RU/SR translations; footer links are set in `public/config.js`.
+- CSV export currently happens client-side; the server also saves merged CSVs for `/merge`/`/api/merge` requests to `generated/`.
+
+## Architecture
+- `server.js`: minimal HTTP server. Serves static assets from `public/`, streams generated CSVs from `generated/`, and exposes JSON APIs:
+  - `POST /merge` → download CSV (for browsers).
+  - `POST /api/merge` → JSON `{ fileName, totalRows, csvPath }` after saving merged CSV.
+  - `POST /api/sessions` → persist a session JSON to `generated/sessions/<id>.json`, responds with `{ id, savedAt }`.
+  - `GET /api/sessions/:id` → read a previously saved session.
+- `public/`: Node-served version of the offline viewer (copied from `offline/`), uses D3 + `jcampconverter` and `peak-db.js` for tips.
+- `generated/`: runtime output (CSV exports and saved sessions); safe to delete/regenerate.
+- `offline/`: original offline drop-in kept intact for comparison or air-gapped use.
+
+Future server extensions (collab, server-side session storage, auth) can hook into `/api/sessions` and extend `server.js` without touching `offline/`.
 
 ## CLI conversion
 ```bash
