@@ -1,6 +1,6 @@
 # FTIR TXT → CSV Merger
 
-This repo now ships the full offline viewer as a Node-served app and keeps the original offline build untouched for reference.
+This repo ships the full offline viewer as a Node-served app and keeps the original offline build untouched for reference.
 
 - **Node web app**: `server.js` hosts the FTIR viewer from `public/` (copied from `offline/`) and exposes APIs for merging and persisting sessions.
 - **CLI**: `convert.js` merges all `.txt` in a folder into `wavenumber` + one column per file.
@@ -9,16 +9,34 @@ This repo now ships the full offline viewer as a Node-served app and keeps the o
 ## Requirements
 Node.js 18+
 
-## Run the web app
+## Install dependencies
+This project uses only built-in Node APIs—no npm install is required.
+
+## Run the web app (server + browser UI)
 ```bash
 node server.js
 ```
 Open http://localhost:3000
 
-UI features (from the offline app):
-- Multi-select FTIR files (.txt, JCAMP variants), per-series visibility + Y offsets, baseline preview, stripes/peaks table, PNG/SVG copy, session export/import.
-- Configurable X/Y ranges with zone highlights; EN/RU/SR translations; footer links are set in `public/config.js`.
-- CSV export currently happens client-side; the server also saves merged CSVs for `/merge`/`/api/merge` requests to `generated/`.
+What you get in the UI:
+- Multi-file upload (.txt, JCAMP variants), chart with zone highlights, per-series visibility + Y offsets, baseline preview, stripes/peaks table, PNG/SVG copy, session export/import.
+- Configurable X/Y ranges; translations EN/RU/SR; footer links configured in `public/config.js`.
+- CSV export currently happens client-side; `/merge`/`/api/merge` also save server copies to `generated/`.
+
+Server endpoints:
+- `POST /merge` → accepts `{ name, files:[{name,content}] }`, returns CSV download (attachment). Saves a copy to `generated/<name>.csv`.
+- `POST /api/merge` → same payload, responds JSON `{ fileName, totalRows, csvPath }` after saving CSV.
+- `POST /api/sessions` → body is your session object (anything the UI wants to persist). Saves to `generated/sessions/<id>.json`, responds `{ id, savedAt }`.
+- `GET /api/sessions/:id` → returns previously saved session JSON.
+- Static assets are served from `public/`; generated CSVs are downloadable under `/generated/<file>.csv`.
+
+How to use the UI:
+1) Open `http://localhost:3000`.
+2) Click the upload icon to add spectra; supported: `.txt`, `.jdx/.dx/.jcm/.jsm`.
+3) Adjust X/Y ranges, toggle series in the legend, set Y offsets per series.
+4) Place a marker on the chart, add stripes/peaks, and copy the table if needed.
+5) Export/import sessions (JSON) for state portability; copy chart as PNG/SVG; save CSV (visible series only).
+6) Translations switch in the header; footer links come from `public/config.js`.
 
 ## Architecture
 - `server.js`: minimal HTTP server. Serves static assets from `public/`, streams generated CSVs from `generated/`, and exposes JSON APIs:
@@ -41,6 +59,11 @@ node convert.js
 node convert.js path/to/folder output.csv
 ```
 Output format: `wavenumber` + %T columns per file (column name = sanitized file name without extension).
+
+CLI details:
+- Input must be plain text files with `wavenumber value` pairs per line (whitespace-separated).
+- Sorting: output is sorted descending by wavenumber (4000 → 500 style).
+- Column naming: derived from the file name; duplicates get `_1`, `_2`, etc.
 
 ## Electron (offline, optional)
 ```bash
