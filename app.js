@@ -5,6 +5,7 @@
   const footerLinks = config.footerLinks || {};
   const chartSettings = config.chart || {};
   const analysisApi = config.analysisApi || '/api/analyze';
+  const peakDetectionApi = config.peakDetectionApi || analysisApi.replace(/\/api\/analyze$/, '/api/peaks/detect');
   const defaultXRange = chartSettings.defaultXRange || { min: 500, max: 4000 };
   const zones = chartSettings.zones || [];
 
@@ -21,6 +22,36 @@
   const xMaxInput = document.getElementById('xMax');
   const yMinInput = document.getElementById('yMin');
   const yMaxInput = document.getElementById('yMax');
+  const peaksSpectrumTitle = document.getElementById('peaksSpectrumTitle');
+  const spectrumSettingsDialog = document.getElementById('spectrumSettingsDialog');
+  const spectrumSettingsForm = document.getElementById('spectrumSettingsForm');
+  const spectrumSettingsId = document.getElementById('spectrumSettingsId');
+  const spectrumSettingsTitle = document.getElementById('spectrumSettingsTitle');
+  const spectrumSettingsName = document.getElementById('spectrumSettingsName');
+  const spectrumSettingsOffset = document.getElementById('spectrumSettingsOffset');
+  const closeSpectrumSettingsBtn = document.getElementById('closeSpectrumSettings');
+  const removeSpectrumFromDialogBtn = document.getElementById('removeSpectrumFromDialog');
+  const detectorSignalType = document.getElementById('detectorSignalType');
+  const detectorBaselineMethod = document.getElementById('detectorBaselineMethod');
+  const detectorMinProminence = document.getElementById('detectorMinProminence');
+  const detectorMinSeparation = document.getElementById('detectorMinSeparation');
+  const detectorSmoothingWindow = document.getElementById('detectorSmoothingWindow');
+  const detectPeaksBtn = document.getElementById('detectPeaks');
+  const detectorStatus = document.getElementById('detectorStatus');
+  const peakDetectionHelpBtn = document.getElementById('peakDetectionHelp');
+  const peakDetectionHelpDialog = document.getElementById('peakDetectionHelpDialog');
+  const closePeakDetectionHelpBtn = document.getElementById('closePeakDetectionHelp');
+  const openPeakProcessingBtn = document.getElementById('openPeakProcessing');
+  const peakProcessingDialog = document.getElementById('peakProcessingDialog');
+  const closePeakProcessingBtn = document.getElementById('closePeakProcessing');
+  const peakProcessingChart = document.getElementById('peakProcessingChart');
+  const peakProcessingMeta = document.getElementById('peakProcessingMeta');
+  const openPeakSettingsBtn = document.getElementById('openPeakSettings');
+  const peakDetectorSettingsDialog = document.getElementById('peakDetectorSettingsDialog');
+  const closePeakSettingsBtn = document.getElementById('closePeakSettings');
+  const cancelPeakSettingsBtn = document.getElementById('cancelPeakSettings');
+  const applyPeakBaselineBtn = document.getElementById('applyPeakBaseline');
+  const detectorBaselineSummary = document.getElementById('detectorBaselineSummary');
   const saveCsvBtn = document.getElementById('saveCsv');
   const copyPngBtn = document.getElementById('copyPng');
   const copySvgBtn = document.getElementById('copySvg');
@@ -31,10 +62,17 @@
   const baselineApplyBtn = document.getElementById('baselineApply');
   const baselineRevertBtn = document.getElementById('baselineRevert');
   const chartRow = document.getElementById('chartRow');
+  const chartControls = document.getElementById('chartControls');
+  const openChartSettingsBtn = document.getElementById('openChartSettings');
+  const chartSettingsDialog = document.getElementById('chartSettingsDialog');
+  const closeChartSettingsBtn = document.getElementById('closeChartSettings');
   const chartLegend = document.getElementById('chartLegend');
   const i18nTargets = document.querySelectorAll('[data-i18n]');
   const langLinks = document.querySelectorAll('.lang-link');
   const addStripeBtn = document.getElementById('addStripe');
+  const confirmAllPeaksBtn = document.getElementById('confirmAllPeaks');
+  const togglePeaksTableBtn = document.getElementById('togglePeaksTable');
+  const peaksTableWrap = document.getElementById('peaksTableWrap');
   const peaksBody = document.getElementById('peaksBody');
   const peaksEmpty = document.getElementById('peaksEmpty');
   const copyStripesBtn = document.getElementById('copyStripes');
@@ -54,16 +92,26 @@
   const footerGithub = document.getElementById('footerGithub');
   const footerCoffee = document.getElementById('footerCoffee');
 
-  const browserLang = ((navigator.language || 'en').slice(0, 2) || 'en').toLowerCase();
-  let currentLang = supportedLangs.includes(browserLang) ? browserLang : 'en';
+  let savedLang = null;
+  try {
+    savedLang = localStorage.getItem('ftir_ui_language');
+  } catch (error) {
+    console.warn('[FTIR language] unable to read saved language', { name: error.name, message: error.message });
+  }
+  // Do not infer the analysis language from the browser locale. The app is
+  // English by default and changes only after an explicit UI selection.
+  let currentLang = supportedLangs.includes(savedLang) ? savedLang : 'en';
 
   let lastData = null;
   let offsets = new Map();
   let lastParsedRows = [];
   let lastColumns = [];
+  let lastSpectra = [];
   let visibleSeries = new Map();
   let markerActive = false;
   let markerX = null;
+  let markerSpectrumId = null;
+  let activeSpectrumId = null;
   let markerUpdater = null;
   let markerStep = 1;
   let merging = false;
@@ -80,7 +128,10 @@ let baselineSeries = null;
 let baselineMap = new Map();
 let baselineModel = null; // {series, method:'poly', degree, coeffs}
 let baselinePreviewModel = null;
-let lastFilesRaw = [];
+  let lastFilesRaw = [];
+  let lastPeakProcessing = null;
+  let detectorProcessedBySpectrum = new Map();
+  let detectorAppliedSettings = new Map();
 let customNames = new Map();
 let isPanning = false;
 let panStartDomain = null;
@@ -103,6 +154,14 @@ let localSaveTimer = null;
     }
     existing.push(name);
     return name;
+  };
+  const makeUniqueSpectrumId = (existing, raw) => {
+    const base = `spectrum-${sanitizeName(raw)}`;
+    let id = base;
+    let n = 2;
+    while (existing.has(id)) id = `${base}-${n++}`;
+    existing.add(id);
+    return id;
   };
 
   function t(key, arg) {
@@ -127,10 +186,16 @@ let localSaveTimer = null;
       link.classList.toggle('active', link.dataset.lang === currentLang);
     });
     document.documentElement.lang = currentLang;
+    updateDetectorControls();
   }
 
   function setLanguage(lang) {
     currentLang = supportedLangs.includes(lang) ? lang : 'en';
+    try {
+      localStorage.setItem('ftir_ui_language', currentLang);
+    } catch (error) {
+      console.warn('[FTIR language] unable to save language', { name: error.name, message: error.message });
+    }
     applyTranslations();
   }
   function applyFooterLinks() {
@@ -710,7 +775,25 @@ let localSaveTimer = null;
     const { skipLegend = false } = options;
     if (!window.d3) return;
     if (!data || !data.length) return;
-    const filteredRaw = data.filter((d) => typeof d.x === 'number' && typeof d.y === 'number' && d.x <= defaultXRange.max && d.x >= defaultXRange.min);
+    // Once baseline correction is applied, replace only the active spectrum
+    // with the processed curve. Other spectra remain available for comparison
+    // and the raw source data stays untouched for export/session persistence.
+    let chartData = data;
+    const processed = detectorProcessedBySpectrum.get(activeSpectrumId);
+    const activePoint = data.find((item) => item.spectrumId === activeSpectrumId);
+    const displayCorrected = processed?.diagnostics?.displayCorrected;
+    const processedX = processed?.diagnostics?.x;
+    if (activePoint && Array.isArray(processedX) && Array.isArray(displayCorrected) && processedX.length && displayCorrected.length) {
+      const processedRows = processedX.map((xValue, index) => ({
+        ...activePoint,
+        x: Number(xValue),
+        y: Number(displayCorrected[index]),
+      })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+      if (processedRows.length) {
+        chartData = data.filter((item) => item.spectrumId !== activeSpectrumId).concat(processedRows);
+      }
+    }
+    const filteredRaw = chartData.filter((d) => typeof d.x === 'number' && typeof d.y === 'number' && d.x <= defaultXRange.max && d.x >= defaultXRange.min);
     const filtered = filteredRaw.map((d) => {
       const base = baselineSeries ? baselineMap.get(d.x) : undefined;
       const adjustedY = typeof base === 'number' ? d.y - base : d.y;
@@ -863,51 +946,37 @@ let localSaveTimer = null;
     if (!skipLegend) {
       chartLegend.innerHTML = '';
       for (const file of allSeries) {
+        const point = lastData.find((item) => item.file === file);
+        const spectrumId = point?.spectrumId || file;
+        const spectrum = lastSpectra.find((item) => item.id === spectrumId);
         const item = document.createElement('div');
-        item.className = 'legend-item';
-        if (baselineSeries === file) item.classList.add('baseline');
+        item.className = 'spectrum-tab nav-link';
+        item.setAttribute('role', 'tab');
+        item.setAttribute('aria-selected', String(activeSpectrumId === spectrumId));
+        if (activeSpectrumId === spectrumId) item.classList.add('active');
         if (visibleSeries.get(file) === false) item.classList.add('inactive');
         const swatch = document.createElement('div');
         swatch.className = 'legend-swatch';
         swatch.style.background = color(file);
-        const labelInput = document.createElement('input');
-        labelInput.className = 'legend-name-input';
-        labelInput.value = customNames.get(file) || file;
-        labelInput.title = file;
-        labelInput.addEventListener('click', (e) => e.stopPropagation());
-        labelInput.addEventListener('input', () => {
-          customNames.set(file, labelInput.value);
-          renderChartFromData(lastData, { skipLegend: true });
-        });
-        const offsetInput = document.createElement('input');
-        offsetInput.type = 'number';
-        offsetInput.step = '0.1';
-        offsetInput.value = offsets.get(file) || 0;
-        offsetInput.className = 'legend-offset';
-        offsetInput.addEventListener('click', (e) => e.stopPropagation());
-        offsetInput.addEventListener('input', () => {
-          offsets.set(file, Number(offsetInput.value) || 0);
-          renderChartFromData(lastData, { skipLegend: true });
-          scheduleLocalSave();
-        });
-        const removeBtn = document.createElement('button');
-        removeBtn.type = 'button';
-        removeBtn.className = 'legend-remove-btn';
-        removeBtn.textContent = '×';
-        removeBtn.title = 'Remove series';
-        removeBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          removeSeries(file);
+        const label = document.createElement('span');
+        label.className = 'spectrum-tab-label';
+        label.textContent = customNames.get(file) || spectrum?.name || file;
+        label.title = `${spectrum?.name || file} · ${spectrumId}`;
+        const gearBtn = document.createElement('button');
+        gearBtn.type = 'button';
+        gearBtn.className = 'spectrum-settings-btn';
+        gearBtn.innerHTML = '<span class="material-symbols-outlined">settings</span>';
+        gearBtn.title = 'Spectrum settings';
+        gearBtn.setAttribute('aria-label', `Settings for ${spectrum?.name || file}`);
+        gearBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          openSpectrumSettings(spectrumId);
         });
         item.appendChild(swatch);
-        item.appendChild(labelInput);
-        // baseline toggle hidden
-        item.appendChild(offsetInput);
-        item.appendChild(removeBtn);
+        item.appendChild(label);
+        item.appendChild(gearBtn);
         item.addEventListener('click', () => {
-          const current = visibleSeries.get(file);
-          visibleSeries.set(file, current === false ? true : false);
-          renderChartFromData(lastData);
+          setActiveSpectrum(spectrumId);
         });
         chartLegend.appendChild(item);
       }
@@ -931,10 +1000,14 @@ let localSaveTimer = null;
       .attr('font-weight', '600')
       .style('user-select', 'none');
 
-    const applyMarker = (xVal) => {
+    const applyMarker = (xVal, spectrumId = null) => {
       const clamped = clampX(xVal);
       markerActive = true;
       markerX = clamped;
+      if (spectrumId) {
+        markerSpectrumId = spectrumId;
+        activeSpectrumId = spectrumId;
+      }
       marker.style('display', 'block');
       markerLine.attr('x1', x(clamped)).attr('x2', x(clamped));
       markerDots.selectAll('circle').remove();
@@ -984,16 +1057,35 @@ let localSaveTimer = null;
     let isDragging = false;
     svg.style('cursor', 'crosshair');
 
+    const findNearestPointAtCursor = (px, py) => {
+      let nearest = null;
+      let bestDistance = Infinity;
+      seriesData.forEach((rows) => {
+        for (const point of rows) {
+          if (activeSpectrumId && point.spectrumId !== activeSpectrumId) continue;
+          const dx = x(point.x) - px;
+          const dy = y(point.y) - py;
+          const distance = dx * dx + dy * dy;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            nearest = point;
+          }
+        }
+      });
+      return nearest;
+    };
+
     const handlePointer = (event) => {
       const [px, py] = d3.pointer(event, g.node());
       if (px < 0 || px > innerW || py < 0 || py > innerH) return;
       const xVal = x.invert(px);
       if (measurementState) {
-        applyMarker(xVal);
+        applyMarker(xVal, measurementState.spectrumId);
         measureStripeFromChart(xVal);
         return;
       }
-      applyMarker(xVal);
+      const nearest = findNearestPointAtCursor(px, py);
+      applyMarker(xVal, nearest?.spectrumId || null);
       updateZoneHighlight(xVal);
     };
 
@@ -1187,8 +1279,26 @@ let localSaveTimer = null;
     const downloadName = opts.fileName || fileNameInput.value.trim() || 'merged.csv';
     const columns = [];
     const table = new Map();
+    const spectra = [];
+    const spectrumIds = new Set();
+    const spectrumIdByColumn = new Map();
     let totalRows = 0;
     const failedFiles = [];
+    const addSpectrum = (name, sourceFile, points, columnName) => {
+      const validPoints = points.filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+      if (!validPoints.length) return null;
+      const spectrumId = makeUniqueSpectrumId(spectrumIds, `${sourceFile || name}-${columnName || ''}`);
+      spectra.push({
+        id: spectrumId,
+        name: name || columnName || 'spectrum',
+        sourceFile: sourceFile || name || columnName || 'spectrum',
+        signalType: 'unknown',
+        xUnit: 'cm-1',
+        points: validPoints.map(([x, y]) => [Number(x), Number(y)]),
+      });
+      if (columnName) spectrumIdByColumn.set(columnName, spectrumId);
+      return spectrumId;
+    };
     payloadFiles.forEach((file) => {
       const parsed = parseSpectraContent(file.content, file.name);
       if (parsed && parsed.type === 'csv') {
@@ -1196,15 +1306,18 @@ let localSaveTimer = null;
         csvCols.forEach((csvCol) => {
           const colName = makeUniqueColumnName(columns, csvCol);
           let added = 0;
+          const points = [];
           rows.forEach((row) => {
             const x = row[xKey];
             const y = row[csvCol];
             if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+            points.push([Number(x), Number(y)]);
             const key = String(x);
             if (!table.has(key)) table.set(key, { x: Number(x), vals: new Map() });
             table.get(key).vals.set(colName, y);
             added++;
           });
+          addSpectrum(csvCol, file.name, points, colName);
           totalRows += added;
           if (!added) failedFiles.push(`${file.name || colName} (${csvCol})`);
         });
@@ -1221,12 +1334,15 @@ let localSaveTimer = null;
       }
       const col = makeUniqueColumnName(columns, file.name);
       totalRows += rows.length;
+      const points = [];
       for (const [x, y] of rows) {
         const key = String(x);
         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        points.push([Number(x), Number(y)]);
         if (!table.has(key)) table.set(key, { x: Number(x), vals: new Map() });
         table.get(key).vals.set(col, y);
       }
+      addSpectrum(file.name, file.name, points, col);
     });
 
     const header = ['wavenumber', ...columns];
@@ -1247,11 +1363,12 @@ let localSaveTimer = null;
     }
     lastParsedRows = parsed;
     lastColumns = cols;
+    lastSpectra = spectra;
     const series = [];
     for (const col of cols) {
       for (const row of parsed) {
         if (typeof row[col] === 'number' && typeof row.wavenumber === 'number') {
-          series.push({ file: col, x: row.wavenumber, y: row[col] });
+          series.push({ file: col, spectrumId: spectrumIdByColumn.get(col) || col, x: row.wavenumber, y: row[col] });
         }
       }
     }
@@ -1260,9 +1377,23 @@ let localSaveTimer = null;
       return;
     }
     lastData = series;
+    lastPeakProcessing = null;
+    detectorProcessedBySpectrum = new Map();
+    detectorAppliedSettings = new Map();
+    if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = true;
     defaultYRange = computeAdjustedExtent(series) || d3.extent(series, (d) => d.y);
     stripeSets = opts.stripeSets || stripeSets;
     if (!stripeSets[activeStripeSet]) stripeSets[activeStripeSet] = [];
+    const defaultSpectrumId = lastSpectra[0]?.id || null;
+    Object.keys(stripeSets).forEach((setId) => {
+      stripeSets[setId] = (stripeSets[setId] || []).map((stripe, index) => ({
+        ...stripe,
+        spectrumId: stripe.spectrumId || defaultSpectrumId,
+        peakId: stripe.peakId || stripe.id || `peak-${setId}-${index + 1}`,
+      }));
+    });
+    markerSpectrumId = opts.markerSpectrumId !== undefined ? opts.markerSpectrumId : defaultSpectrumId;
+    activeSpectrumId = opts.activeSpectrumId || markerSpectrumId || defaultSpectrumId;
     baselinePreviewModel = null;
     baselineModel = null;
     baselineSeries = null;
@@ -1270,6 +1401,7 @@ let localSaveTimer = null;
     offsets = new Map();
     cols.forEach((col) => offsets.set(col, (opts.offsets && opts.offsets[col]) || 0));
     customNames = new Map(Object.entries(opts.customNames || {}));
+    updateSpectrumSelector();
     if (opts.visibleSeries) {
       Object.entries(opts.visibleSeries).forEach(([k, v]) => visibleSeries.set(k, v));
     }
@@ -1309,15 +1441,269 @@ let localSaveTimer = null;
     return out;
   }
 
-  function currentStripes() {
-    return stripeSets[activeStripeSet] || [];
+  function updateSpectrumSelector() {
+    if (!lastSpectra.length) {
+      if (peaksSpectrumTitle) peaksSpectrumTitle.textContent = 'No spectrum selected';
+      if (chartLegend) chartLegend.innerHTML = '';
+      return;
+    }
+    const ids = new Set(lastSpectra.map((spectrum) => spectrum.id));
+    if (!ids.has(activeSpectrumId)) activeSpectrumId = lastSpectra[0].id;
+    if (!ids.has(markerSpectrumId)) markerSpectrumId = activeSpectrumId;
+    const selected = lastSpectra.find((spectrum) => spectrum.id === activeSpectrumId);
+    const selectedPoint = lastData?.find((point) => point.spectrumId === activeSpectrumId);
+    const displayName = selectedPoint ? customNames.get(selectedPoint.file) : null;
+    if (peaksSpectrumTitle) peaksSpectrumTitle.textContent = `${displayName || selected?.name || activeSpectrumId} · ${activeSpectrumId}`;
   }
 
-  function findNearestSpectrumPoint(xVal) {
+  function updateDetectorControls() {
+    const hasActiveSpectrum = Boolean(lastData?.length && activeSpectrumId);
+    const applied = detectorAppliedSettings.get(activeSpectrumId);
+    const selectedMethod = detectorBaselineMethod?.value || 'arpls';
+    const selectedSignalType = detectorSignalType?.value || 'unknown';
+    const hasAppliedBaseline = Boolean(
+      applied && applied.baselineMethod === selectedMethod && applied.signalType === selectedSignalType
+    );
+    if (openPeakSettingsBtn) openPeakSettingsBtn.disabled = !hasActiveSpectrum;
+    if (detectPeaksBtn && !detectPeaksBtn.dataset.busy) detectPeaksBtn.disabled = !hasActiveSpectrum;
+    if (openPeakProcessingBtn) {
+      openPeakProcessingBtn.disabled = !hasActiveSpectrum || !lastPeakProcessing || lastPeakProcessing.spectrumId !== activeSpectrumId;
+    }
+    if (detectorBaselineSummary) {
+      detectorBaselineSummary.textContent = `${t('detectorBaseline')}: ${hasAppliedBaseline ? selectedMethod.toUpperCase() : t('detectorRawMode')}`;
+      detectorBaselineSummary.classList.toggle('is-applied', hasAppliedBaseline);
+    }
+  }
+
+  function setActiveSpectrum(spectrumId) {
+    if (!spectrumId || !lastSpectra.some((spectrum) => spectrum.id === spectrumId)) return;
+    activeSpectrumId = spectrumId;
+    markerSpectrumId = spectrumId;
+    lastPeakProcessing = detectorProcessedBySpectrum.get(spectrumId) || null;
+    if (detectorBaselineMethod && detectorAppliedSettings.has(spectrumId)) {
+      detectorBaselineMethod.value = detectorAppliedSettings.get(spectrumId).baselineMethod || detectorBaselineMethod.value;
+    }
+    updateDetectorControls();
+    if (openPeakProcessingBtn) {
+      openPeakProcessingBtn.disabled = !lastPeakProcessing || lastPeakProcessing.spectrumId !== spectrumId;
+    }
+    updateSpectrumSelector();
+    renderChartFromData(lastData);
+    renderStripesTable();
+    scheduleLocalSave();
+  }
+
+  function spectrumColumn(spectrumId) {
+    return lastData?.find((point) => point.spectrumId === spectrumId)?.file || null;
+  }
+
+  function openSpectrumSettings(spectrumId) {
+    const spectrum = lastSpectra.find((item) => item.id === spectrumId);
+    const column = spectrumColumn(spectrumId);
+    if (!spectrum || !spectrumSettingsDialog) return;
+    spectrumSettingsId.value = spectrumId;
+    spectrumSettingsTitle.textContent = spectrum.name || spectrumId;
+    spectrumSettingsName.value = customNames.get(column) || spectrum.name || spectrumId;
+    spectrumSettingsOffset.value = offsets.get(column) || 0;
+    spectrumSettingsDialog.showModal();
+  }
+
+  function closeSpectrumSettings() {
+    if (spectrumSettingsDialog?.open) spectrumSettingsDialog.close();
+  }
+
+  function buildPeakDetectionPayload(options = {}) {
+    const selectedSignalType = detectorSignalType?.value;
+    const selectedBaselineMethod = detectorBaselineMethod?.value || 'arpls';
+    const forcedBaselineMethod = options.baselineMethodOverride || null;
+    const appliedBaseline = detectorAppliedSettings.get(activeSpectrumId);
+    const baselineIsCurrent = appliedBaseline
+      && appliedBaseline.baselineMethod === selectedBaselineMethod
+      && appliedBaseline.signalType === (selectedSignalType || 'unknown');
+    return {
+      schemaVersion: '2.0',
+      spectra: lastSpectra.filter((spectrum) => spectrum.id === activeSpectrumId).map((spectrum) => ({
+        id: spectrum.id,
+        name: spectrum.name,
+        sourceFile: spectrum.sourceFile,
+        signalType: selectedSignalType && selectedSignalType !== 'unknown'
+          ? selectedSignalType
+          : spectrum.signalType || 'unknown',
+        xUnit: spectrum.xUnit || 'cm-1',
+        points: spectrum.points,
+      })),
+      settings: {
+        smoothingMethod: 'moving_average',
+        smoothingWindow: Math.max(1, Number(detectorSmoothingWindow?.value) || 5),
+        // An unapplied baseline selection must not silently affect detection.
+        // It remains a raw search until the user presses Apply baseline.
+        baselineMethod: forcedBaselineMethod || (baselineIsCurrent ? selectedBaselineMethod : 'none'),
+        baselineLambda: 1000000,
+        baselineAsymmetry: 0.01,
+        baselineSnipWindowCm1: 80,
+        broadProminenceWindowCm1: 800,
+        broadSmoothingWindow: 31,
+        broadMinSeparationCm1: 180,
+        broadBaselineMethod: 'linear',
+        crossEngineMergeCm1: 20,
+        minProminence: Math.max(0, Number(detectorMinProminence?.value) || 0),
+        minSeparationCm1: Math.max(0.1, Number(detectorMinSeparation?.value) || 8),
+        maxPeaks: 300,
+      },
+    };
+  }
+
+  async function requestPeakProcessing(options = {}) {
+    const payload = buildPeakDetectionPayload(options);
+    const response = await fetch(peakDetectionApi, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Peak detection failed (${response.status})`);
+    const processing = Array.isArray(body.processing)
+      ? body.processing.find((item) => item.spectrumId === activeSpectrumId)
+      : null;
+    if (!processing) throw new Error('The server returned no processing data for the active spectrum.');
+    return { payload, body, processing };
+  }
+
+  let baselinePreviewRequest = 0;
+  async function previewPeakBaseline() {
+    if (!activeSpectrumId || !lastData?.length || !peakProcessingChart) return;
+    const requestId = ++baselinePreviewRequest;
+    if (peakProcessingMeta) peakProcessingMeta.textContent = t('detectorPreviewing');
+    peakProcessingChart.textContent = t('detectorPreviewing');
+    try {
+      const { processing } = await requestPeakProcessing({
+        baselineMethodOverride: detectorBaselineMethod?.value || 'arpls',
+      });
+      if (requestId !== baselinePreviewRequest) return;
+      renderPeakProcessingDiagnostics(processing, { compact: true });
+    } catch (error) {
+      if (requestId !== baselinePreviewRequest) return;
+      peakProcessingChart.textContent = error.message || t('detectorUnavailable');
+      if (peakProcessingMeta) peakProcessingMeta.textContent = t('detectorUnavailable');
+    }
+  }
+
+  async function applyPeakBaseline() {
+    if (!activeSpectrumId || !lastData?.length) return;
+    if (applyPeakBaselineBtn) applyPeakBaselineBtn.disabled = true;
+    if (detectorStatus) detectorStatus.textContent = t('detectorApplying');
+    try {
+      const { processing } = await requestPeakProcessing({
+        baselineMethodOverride: detectorBaselineMethod?.value || 'arpls',
+      });
+      detectorProcessedBySpectrum.set(activeSpectrumId, processing);
+      detectorAppliedSettings.set(activeSpectrumId, {
+        baselineMethod: detectorBaselineMethod?.value || 'arpls',
+        signalType: detectorSignalType?.value || 'unknown',
+      });
+      lastPeakProcessing = processing;
+      updateDetectorControls();
+      renderChartFromData(lastData);
+      if (peakDetectorSettingsDialog?.open) peakDetectorSettingsDialog.close();
+      setStatus(t('detectorApplied'));
+      if (detectorStatus) detectorStatus.textContent = `${t('detectorReady')} · ${processing.baselineMethod}/${processing.baselineEngine || 'baseline'}`;
+    } catch (error) {
+      if (detectorStatus) detectorStatus.textContent = error.message || t('detectorUnavailable');
+      setStatus(t('detectorUnavailable'), true);
+    } finally {
+      if (applyPeakBaselineBtn) applyPeakBaselineBtn.disabled = false;
+      updateDetectorControls();
+    }
+  }
+
+  async function detectPeaks() {
+    if (!lastSpectra.length) {
+      setStatus('Load at least one spectrum before detecting peaks.', true);
+      return;
+    }
+    const payload = buildPeakDetectionPayload();
+    if (detectorStatus) detectorStatus.textContent = `Detecting in ${payload.spectra.length} spectra...`;
+    if (detectPeaksBtn) {
+      detectPeaksBtn.disabled = true;
+      detectPeaksBtn.dataset.busy = 'true';
+    }
+    try {
+      const { body, processing: responseProcessing } = await requestPeakProcessing();
+      const detected = Array.isArray(body.peakObservations) ? body.peakObservations : [];
+      const processing = responseProcessing;
+      detectorProcessedBySpectrum.set(activeSpectrumId, processing);
+      if (payload.settings.baselineMethod === 'none') {
+        // A raw search must not turn an unapplied selection into an applied
+        // baseline. The next parameter change should remain a raw search.
+        detectorAppliedSettings.delete(activeSpectrumId);
+      } else {
+        detectorAppliedSettings.set(activeSpectrumId, {
+          baselineMethod: detectorBaselineMethod?.value || 'arpls',
+          signalType: detectorSignalType?.value || 'unknown',
+        });
+      }
+      lastPeakProcessing = processing;
+      if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = !processing?.diagnostics?.x?.length;
+      const existingCandidates = stripeSets.candidates || [];
+      // Re-running detection refreshes only the automatic candidates for the
+      // active spectrum. Manual candidates and results from other spectra must
+      // stay untouched.
+      const retainedCandidates = existingCandidates.filter((stripe) => (
+        stripe.source !== 'automatic' || stripe.spectrumId !== activeSpectrumId
+      ));
+      stripeSets.candidates = [
+        ...retainedCandidates,
+        ...detected.map((peak, index) => ({
+          id: peak.id || `stripe-auto-${index + 1}`,
+          peakId: peak.id || `peak-auto-${index + 1}`,
+          spectrumId: peak.spectrumId || activeSpectrumId,
+          x: Number(peak.nu),
+          color: stripeColors[index % stripeColors.length],
+          label: '',
+          tip: `Automatic candidate · ${body.engine || 'detector'}`,
+          labelSource: 'empty',
+          source: 'automatic',
+          originalNu: peak.originalNu,
+          prominence: peak.prominence,
+          widthCm1: peak.widthCm1,
+          fwhmCm1: peak.fwhmCm1,
+          intensity: Number.isFinite(Number(peak.confidence)) ? Math.round(Number(peak.confidence) * 100) : null,
+          shape: peak.shape,
+          localWindow: peak.localWindow,
+        })),
+      ];
+      activeStripeSet = 'candidates';
+      if (detectorStatus) {
+        const baselineInfo = processing?.baselineMethod
+          ? ` · ${processing.baselineMethod}/${processing.baselineEngine || 'baseline'} · ${processing.signalType || 'unknown'}`
+          : '';
+        detectorStatus.textContent = `${detected.length} candidates · ${body.engine || 'detector'}${baselineInfo}`;
+      }
+      renderChartFromData(lastData);
+      renderStripesTable();
+      scheduleLocalSave();
+      setStatus(`Detected ${detected.length} peaks across ${payload.spectra.length} spectra.`);
+    } catch (error) {
+      console.error('[FTIR peak detection] request.failed', { url: peakDetectionApi, message: error.message });
+      if (detectorStatus) detectorStatus.textContent = error.message || 'Detector unavailable.';
+      setStatus('Peak detector unavailable.', true);
+    } finally {
+      if (detectPeaksBtn) delete detectPeaksBtn.dataset.busy;
+      updateDetectorControls();
+    }
+  }
+
+  function currentStripes() {
+    const stripes = stripeSets[activeStripeSet] || [];
+    return activeSpectrumId ? stripes.filter((stripe) => stripe.spectrumId === activeSpectrumId) : stripes;
+  }
+
+  function findNearestSpectrumPoint(xVal, spectrumId = null) {
     let nearest = null;
     let bestDistance = Infinity;
     for (const point of lastData || []) {
       if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      if (spectrumId && point.spectrumId !== spectrumId) continue;
       const distance = Math.abs(point.x - xVal);
       if (distance < bestDistance) {
         bestDistance = distance;
@@ -1330,10 +1716,10 @@ let localSaveTimer = null;
   function estimatePeakShape(centerX, leftX, rightX) {
     const minX = Math.min(leftX, rightX);
     const maxX = Math.max(leftX, rightX);
-    const centerPoint = findNearestSpectrumPoint(centerX);
+    const centerPoint = findNearestSpectrumPoint(centerX, measurementState?.spectrumId || null);
     if (!centerPoint) return { shape: 'unknown', fwhmCm1: null };
     const points = (lastData || [])
-      .filter((point) => point.file === centerPoint.file && point.x >= minX && point.x <= maxX)
+      .filter((point) => point.spectrumId === centerPoint.spectrumId && point.x >= minX && point.x <= maxX)
       .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
       .sort((a, b) => a.x - b.x);
     if (points.length < 5) return { shape: 'unknown', fwhmCm1: null };
@@ -1374,11 +1760,15 @@ let localSaveTimer = null;
     const leftX = measurementState.leftX;
     const centerX = measurementState.centerX;
     const width = Math.abs(xVal - leftX);
-    const centerPoint = findNearestSpectrumPoint(centerX);
-    const leftPoint = findNearestSpectrumPoint(leftX);
-    const rightPoint = findNearestSpectrumPoint(xVal);
+    const spectrumId = stripe.spectrumId || measurementState.spectrumId || null;
+    const centerPoint = findNearestSpectrumPoint(centerX, spectrumId);
+    const leftPoint = findNearestSpectrumPoint(leftX, spectrumId);
+    const rightPoint = findNearestSpectrumPoint(xVal, spectrumId);
     const edgeValues = [leftPoint?.y, rightPoint?.y].filter(Number.isFinite);
-    const allValues = (lastData || []).map((point) => point.y).filter(Number.isFinite);
+    const allValues = (lastData || [])
+      .filter((point) => !spectrumId || point.spectrumId === spectrumId)
+      .map((point) => point.y)
+      .filter(Number.isFinite);
     if (centerPoint && edgeValues.length && allValues.length > 1) {
       const edgeAverage = edgeValues.reduce((sum, value) => sum + value, 0) / edgeValues.length;
       const signalRange = Math.max(...allValues) - Math.min(...allValues);
@@ -1402,7 +1792,7 @@ let localSaveTimer = null;
   function startStripeMeasurement(setId, stripeId) {
     const stripe = (stripeSets[setId] || []).find((item) => item.id === stripeId);
     if (!stripe || !Number.isFinite(Number(stripe.x))) return;
-    measurementState = { setId, stripeId, centerX: Number(stripe.x), step: 'left' };
+    measurementState = { setId, stripeId, spectrumId: stripe.spectrumId || markerSpectrumId || null, centerX: Number(stripe.x), step: 'left' };
     setActiveStripeSet(setId);
     chartEl.classList.add('chart-measuring');
     setStatus('Width mode: click the left boundary, then the right boundary.');
@@ -1410,25 +1800,55 @@ let localSaveTimer = null;
 
   function buildConfirmedPeaksPayload() {
     const confirmed = Array.isArray(stripeSets.confirmed) ? stripeSets.confirmed : [];
-    return {
-      version: '1.0',
-      spectrum: {
-        files: lastFilesRaw.map((file) => file.name).filter(Boolean),
-        sample: sampleInput?.value || '',
-        series: lastColumns.slice(),
-      },
-      confirmedPeaks: confirmed.map((stripe) => ({
-        id: stripe.id || null,
-        nu: Number.isFinite(Number(stripe.x)) ? Number(stripe.x) : null,
-        label: stripe.labelSource === 'manual' ? (stripe.label || '') : (stripe.analysisLabel || stripe.label || ''),
+    const candidates = Array.isArray(stripeSets.candidates) ? stripeSets.candidates : [];
+    const observationsById = new Map();
+    [...candidates, ...confirmed].forEach((stripe) => {
+      const spectrumId = stripe.spectrumId || null;
+      const nu = Number(stripe.x);
+      if (!spectrumId || !Number.isFinite(nu)) return;
+      const id = String(stripe.peakId || stripe.id || `peak-${spectrumId}-${nu.toFixed(2)}`);
+      observationsById.set(id, {
+        id,
+        spectrumId,
+        nu,
+        originalNu: Number.isFinite(Number(stripe.originalNu)) ? Number(stripe.originalNu) : nu,
+        height: Number.isFinite(Number(stripe.height)) ? Number(stripe.height) : null,
+        prominence: Number.isFinite(Number(stripe.prominence)) ? Number(stripe.prominence) : null,
         widthCm1: Number.isFinite(Number(stripe.widthCm1)) ? Number(stripe.widthCm1) : null,
         fwhmCm1: Number.isFinite(Number(stripe.fwhmCm1)) ? Number(stripe.fwhmCm1) : null,
-        intensity: stripe.intensity || null,
         shape: stripe.shape || null,
-        source: stripe.source || 'manual',
-        localWindow: Array.isArray(stripe.localWindow) ? stripe.localWindow : null,
-      })),
-      analysis: analysisData,
+        direction: stripe.direction || 'absorption',
+        detectionMethod: stripe.source === 'automatic' ? 'automatic' : 'manual',
+        confidence: Number.isFinite(Number(stripe.confidence))
+          ? Number(stripe.confidence)
+          : Number.isFinite(Number(stripe.intensity)) ? Number(stripe.intensity) / 100 : null,
+      });
+    });
+    const peakObservations = Array.from(observationsById.values());
+    const confirmedPeakIds = confirmed
+      .map((stripe) => String(stripe.peakId || stripe.id || ''))
+      .filter((id) => observationsById.has(id));
+    const spectra = lastSpectra.map((spectrum) => ({
+      id: spectrum.id,
+      name: customNames.get(spectrumColumn(spectrum.id)) || spectrum.name,
+      sourceFile: spectrum.sourceFile,
+      signalType: spectrum.signalType || 'unknown',
+      xUnit: spectrum.xUnit || 'cm-1',
+      pointCount: spectrum.points.length,
+    }));
+    return {
+      schemaVersion: '2.0',
+      sample: { id: sampleInput?.value || 'sample', name: sampleInput?.value || '' },
+      spectra,
+      peakObservations,
+      peakGroups: [],
+      confirmedPeakIds,
+      analysisSettings: {
+        language: currentLang,
+        reactionMode: spectra.length > 1,
+        toleranceCm1: 8,
+        shiftThresholdCm1: 2,
+      },
     };
   }
 
@@ -1448,6 +1868,9 @@ let localSaveTimer = null;
       yRange: { min: yMinInput.value, max: yMaxInput.value },
       customNames: Object.fromEntries(customNames),
       analysis: analysisData,
+      spectra: lastSpectra,
+      markerSpectrumId,
+      activeSpectrumId,
     };
   }
 
@@ -1500,6 +1923,8 @@ let localSaveTimer = null;
         yRange: session.yRange,
         customNames: session.customNames,
         stripeSets,
+        markerSpectrumId: session.markerSpectrumId,
+        activeSpectrumId: session.activeSpectrumId,
       });
       analysisData = session.analysis || null;
       if (analysisData && analysisCard && analysisResult) {
@@ -1538,6 +1963,20 @@ let localSaveTimer = null;
         ${candidate.reasoning || candidate.explanation ? `<p>${escapeHtml(candidate.reasoning || candidate.explanation)}</p>` : `<p class="analysis-warning">No explanation returned for this candidate.</p>`}
       </article>`;
     }).join('');
+    const spectrumReports = Array.isArray(result.spectra) ? result.spectra : [];
+    const assignmentSections = spectrumReports.map((report) => {
+      const assignments = Array.isArray(report.peakAssignments) ? report.peakAssignments : [];
+      if (!assignments.length) return '';
+      const spectrum = lastSpectra.find((item) => item.id === report.spectrumId);
+      const spectrumName = customNames.get(spectrumColumn(report.spectrumId)) || spectrum?.name || report.spectrumId;
+      return `<section class="analysis-spectrum"><div class="analysis-spectrum-head"><h4>${escapeHtml(spectrumName)}</h4><span>${escapeHtml(report.spectrumId)}</span></div><div class="analysis-candidates">${assignments.map((assignment) => {
+        const label = assignment.group || assignment.assignment || 'Functional group not assigned';
+        const confidence = assignment.confidence || assignment.likelihood || 'unknown';
+        const confidenceClass = String(confidence).toLowerCase().replace(/[^a-z]+/g, '-');
+        return `<article class="analysis-candidate"><div class="analysis-candidate-head"><span class="analysis-peak">${escapeHtml(assignment.nu)} cm⁻¹</span><h4>${escapeHtml(label)}</h4><span class="analysis-confidence ${confidenceClass}">${escapeHtml(confidence)}</span></div><small class="analysis-peak-id">${escapeHtml(assignment.peakId || '')}</small><p>${escapeHtml(assignment.reasoning || 'No reasoning returned.')}</p></article>`;
+      }).join('')}</div></section>`;
+    }).join('');
+    const hasSpectrumAssignments = spectrumReports.some((report) => Array.isArray(report.peakAssignments) && report.peakAssignments.length);
     const supporting = Array.isArray(result.supporting_peaks) && result.supporting_peaks.length
       ? `<section class="analysis-section"><h4>Supporting peaks</h4><div class="analysis-tags">${result.supporting_peaks.map((peak) => {
         const value = typeof peak === 'object' ? peak.nu : peak;
@@ -1549,9 +1988,69 @@ let localSaveTimer = null;
       result.missing_evidence?.length ? `<section class="analysis-section"><h4>Missing evidence</h4>${list(result.missing_evidence)}</section>` : '',
       result.limitations?.length ? `<section class="analysis-section"><h4>Limitations</h4>${list(result.limitations)}</section>` : '',
     ].join('');
+    const reaction = result.reactionAssessment;
+    const reactionStatus = {
+      passed: 'Reaction passed',
+      not_passed: 'Reaction not passed',
+      inconclusive: 'Inconclusive',
+    }[reaction?.status] || 'Reaction assessment';
+    const reactionCard = reaction
+      ? `<section class="analysis-reaction ${escapeHtml(reaction.status || 'inconclusive')}">
+          <div class="analysis-reaction-head"><h4>${reactionStatus}</h4><span>${escapeHtml(reaction.confidence || 'unknown')}</span></div>
+          <p>${escapeHtml(reaction.summary || 'No reaction summary provided.')}</p>
+          ${reaction.missingEvidence?.length ? list(reaction.missingEvidence) : ''}
+        </section>`
+      : '';
+    const formatNumber = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '—';
+    const displaySpectrum = (spectrumId) => {
+      if (!spectrumId) return '—';
+      const spectrum = lastSpectra.find((item) => item.id === spectrumId);
+      return customNames.get(spectrumColumn(spectrumId)) || spectrum?.name || spectrumId;
+    };
+    const changeSummary = result.changeSummary && typeof result.changeSummary === 'object' ? result.changeSummary : null;
+    const summaryByGroup = new Map();
+    if (changeSummary) {
+      Object.entries({
+        disappeared: 'disappeared_peak',
+        appeared: 'appeared_peak',
+        shifted: 'shifted_peak',
+        intensityChanges: 'prominence_change',
+        widthChanges: 'width_change',
+      }).forEach(([key, type]) => {
+        (Array.isArray(changeSummary[key]) ? changeSummary[key] : []).forEach((change) => {
+          const groupId = change.groupId || change.peakGroupId;
+          if (groupId) summaryByGroup.set(`${type}:${groupId}`, { ...change, type });
+        });
+      });
+    }
+    const objectiveChanges = Array.isArray(result.comparison?.changes) ? result.comparison.changes : [];
+    const changes = objectiveChanges.length
+      ? objectiveChanges.map((change) => ({ ...change, explanation: summaryByGroup.get(`${change.type}:${change.groupId}`)?.explanation || summaryByGroup.get(`${change.type}:${change.groupId}`)?.reasoning || '' }))
+      : Array.from(summaryByGroup.values());
+    const changeLabels = {
+      disappeared_peak: 'Disappeared',
+      appeared_peak: 'Appeared',
+      shifted_peak: 'Shifted',
+      prominence_change: 'Prominence changed',
+      width_change: 'Width changed',
+    };
+    const comparisonSection = changes.length
+      ? `<section class="analysis-section"><h4>Changes between spectra</h4><div class="analysis-changes">${changes.map((change) => {
+          const details = change.type === 'shifted_peak'
+            ? `${formatNumber(change.fromNu)} → ${formatNumber(change.toNu)} cm⁻¹ (Δ ${formatNumber(change.deltaNu)})`
+            : change.type === 'prominence_change'
+              ? `Δ prominence ${formatNumber(change.deltaProminence)}`
+              : change.type === 'width_change'
+                ? `Δ FWHM ${formatNumber(change.deltaFwhm)} cm⁻¹`
+                : `${formatNumber(change.nu)} cm⁻¹`;
+          return `<div class="analysis-change"><strong>${escapeHtml(changeLabels[change.type] || change.type)}</strong><span>${escapeHtml(displaySpectrum(change.fromSpectrumId))} → ${escapeHtml(displaySpectrum(change.toSpectrumId))}</span><em>${escapeHtml(details)}</em>${change.explanation ? `<p>${escapeHtml(change.explanation)}</p>` : ''}</div>`;
+        }).join('')}</div></section>`
+      : '';
     return `<div class="analysis-report">
+      ${reactionCard}
       <section class="analysis-summary"><h4>Interpretation</h4><p>${escapeHtml(result.interpretation || 'No summary provided.')}</p></section>
-      ${candidateCards ? `<section class="analysis-section"><h4>Candidate assignments</h4><div class="analysis-candidates">${candidateCards}</div></section>` : ''}
+      ${assignmentSections || (!hasSpectrumAssignments && candidateCards ? `<section class="analysis-section"><h4>Confirmed peak assignments by spectrum</h4><div class="analysis-candidates">${candidateCards}</div></section>` : '')}
+      ${comparisonSection}
       ${supporting}${sections}
       <div class="analysis-footer"><span>Confidence: <strong>${escapeHtml(result.confidence || 'unknown')}</strong></span>${result.model ? `<span>Model: ${escapeHtml(result.model)}</span>` : ''}</div>
     </div>`;
@@ -1559,12 +2058,20 @@ let localSaveTimer = null;
 
   function applyAnalysisSuggestions(result) {
     const confirmed = Array.isArray(stripeSets.confirmed) ? stripeSets.confirmed : [];
-    const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+    const legacyCandidates = Array.isArray(result?.candidates) ? result.candidates : [];
+    const spectrumCandidates = (Array.isArray(result?.spectra) ? result.spectra : []).flatMap((report) => (
+      (Array.isArray(report.peakAssignments) ? report.peakAssignments : []).map((assignment) => ({
+        ...assignment,
+        spectrumId: report.spectrumId,
+      }))
+    ));
+    const candidates = spectrumCandidates.length ? spectrumCandidates : legacyCandidates;
     let applied = 0;
     candidates.forEach((candidate) => {
       const explicitNu = candidate.nu ?? candidate.wavenumber ?? candidate.peak;
       const candidateNu = Number(explicitNu);
       const stripe = confirmed.reduce((nearest, item) => {
+        if (candidate.spectrumId && item.spectrumId !== candidate.spectrumId) return nearest;
         const distance = Number.isFinite(candidateNu) ? Math.abs(Number(item.x) - candidateNu) : 0;
         if (!nearest || distance < nearest.distance) return { item, distance };
         return nearest;
@@ -1587,7 +2094,7 @@ let localSaveTimer = null;
 
   async function analyzeConfirmedPeaks() {
     const payload = buildConfirmedPeaksPayload();
-    if (!payload.confirmedPeaks.length) {
+    if (!payload.confirmedPeakIds.length) {
       setStatus('No confirmed peaks to analyze.', true);
       return;
     }
@@ -1598,8 +2105,9 @@ let localSaveTimer = null;
     console.info('[FTIR analysis] request.start', {
       url: analysisApi,
       origin: window.location.origin,
-      confirmedPeaks: payload.confirmedPeaks.length,
-      files: payload.spectrum.files.length,
+      confirmedPeaks: payload.confirmedPeakIds.length,
+      observations: payload.peakObservations.length,
+      files: payload.spectra.length,
     });
     try {
       const startedAt = performance.now();
@@ -1704,6 +2212,7 @@ let localSaveTimer = null;
 
   function renderStripesTable() {
     if (!peaksBody || !peaksEmpty) return;
+    if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = !lastData || !(stripeSets.candidates || []).length;
     peaksBody.innerHTML = '';
     const stripes = currentStripes();
     if (!stripes.length) {
@@ -1747,13 +2256,19 @@ let localSaveTimer = null;
       const tipCell = document.createElement('div');
       tipCell.className = 'peaks-tip';
       tipCell.textContent = stripe.analysisTip || stripe.tip || t('tipPlaceholder');
+      const spectrum = lastSpectra.find((item) => item.id === stripe.spectrumId);
+      const spectrumMeta = document.createElement('div');
+      spectrumMeta.className = 'peaks-meta';
+      spectrumMeta.textContent = `Spectrum: ${spectrum?.name || stripe.spectrumId || 'not assigned'}`;
+      tipCell.prepend(spectrumMeta);
       if (stripe.widthCm1 !== undefined || stripe.intensity !== undefined || stripe.shape) {
         const meta = document.createElement('div');
         meta.className = 'peaks-meta';
         const widthText = Number.isFinite(Number(stripe.widthCm1)) ? `${Number(stripe.widthCm1).toFixed(2)} cm⁻¹` : '—';
         const fwhmText = Number.isFinite(Number(stripe.fwhmCm1)) ? `${Number(stripe.fwhmCm1).toFixed(2)} cm⁻¹` : '—';
         const intensityText = Number.isFinite(Number(stripe.intensity)) ? `${stripe.intensity}%` : '—';
-        meta.textContent = `Width: ${widthText} | FWHM: ${fwhmText} | Intensity: ${intensityText} | Shape: ${stripe.shape || '—'}`;
+        const prominenceText = Number.isFinite(Number(stripe.prominence)) ? `${Number(stripe.prominence).toFixed(3)}` : '—';
+        meta.textContent = `Width: ${widthText} | FWHM: ${fwhmText} | Prominence: ${prominenceText} | Confidence: ${intensityText}% | Shape: ${stripe.shape || '—'}`;
         tipCell.appendChild(meta);
       }
       const moveWrap = document.createElement('div');
@@ -1778,7 +2293,7 @@ let localSaveTimer = null;
           btn.style.display = 'none';
         }
         btn.addEventListener('click', () => {
-          stripeSets[activeStripeSet] = stripes.filter((s) => s.id !== stripe.id);
+          stripeSets[activeStripeSet] = (stripeSets[activeStripeSet] || []).filter((s) => s.id !== stripe.id);
           const target = stripeSets[setId] || [];
           stripeSets[setId] = [...target, { ...stripe, color: stripeColors[target.length % stripeColors.length] }];
           setActiveStripeSet(setId);
@@ -1791,7 +2306,7 @@ let localSaveTimer = null;
       removeBtn.setAttribute('aria-label', 'remove stripe');
       removeBtn.textContent = '×';
       removeBtn.addEventListener('click', () => {
-        stripeSets[activeStripeSet] = stripes.filter((s) => s.id !== stripe.id);
+        stripeSets[activeStripeSet] = (stripeSets[activeStripeSet] || []).filter((s) => s.id !== stripe.id);
         renderChartFromData(lastData);
         renderStripesTable();
         scheduleLocalSave();
@@ -1808,6 +2323,10 @@ let localSaveTimer = null;
     copyPngBtn.disabled = !enabled;
     copySvgBtn.disabled = !enabled;
     if (showPointsInput) showPointsInput.disabled = true;
+    if (detectPeaksBtn) detectPeaksBtn.disabled = !enabled || !lastSpectra.length;
+    if (openPeakSettingsBtn) openPeakSettingsBtn.disabled = !enabled || !lastSpectra.length;
+    if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = !enabled || !lastPeakProcessing || lastPeakProcessing.spectrumId !== activeSpectrumId;
+    if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = !enabled || !(stripeSets.candidates || []).length;
     xMinInput.disabled = !enabled;
     xMaxInput.disabled = !enabled;
     yMinInput.disabled = !enabled;
@@ -1818,7 +2337,8 @@ let localSaveTimer = null;
     if (baselineApplyBtn) baselineApplyBtn.disabled = true;
     if (baselineRevertBtn) baselineRevertBtn.disabled = true;
     chartRow.classList.toggle('is-hidden', !enabled);
-    document.getElementById('chartControls').classList.toggle('active', enabled);
+    chartControls?.classList.toggle('active', enabled);
+    if (openChartSettingsBtn) openChartSettingsBtn.disabled = !enabled;
     if (enabled) {
       xMaxInput.value = String(defaultXRange.max);
       xMinInput.value = String(defaultXRange.min);
@@ -1828,12 +2348,205 @@ let localSaveTimer = null;
       yMaxInput.placeholder = t('yAuto') || 'auto';
       visibleSeries = new Map();
     }
+    updateDetectorControls();
   }
 
   refreshBtn.addEventListener('click', () => {
     if (lastData) {
       renderChartFromData(lastData);
     }
+  });
+
+  spectrumSettingsForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const spectrumId = spectrumSettingsId?.value;
+    const column = spectrumColumn(spectrumId);
+    if (!column) {
+      closeSpectrumSettings();
+      return;
+    }
+    const name = spectrumSettingsName?.value.trim() || '';
+    if (name) customNames.set(column, name);
+    else customNames.delete(column);
+    offsets.set(column, Number(spectrumSettingsOffset?.value) || 0);
+    closeSpectrumSettings();
+    updateSpectrumSelector();
+    updateBaselineSelectOptions();
+    renderChartFromData(lastData);
+    renderStripesTable();
+    scheduleLocalSave();
+  });
+
+  openChartSettingsBtn?.addEventListener('click', () => {
+    if (!chartSettingsDialog || !lastData) return;
+    chartSettingsDialog.showModal();
+  });
+  closeChartSettingsBtn?.addEventListener('click', () => {
+    if (chartSettingsDialog?.open) chartSettingsDialog.close();
+  });
+  chartSettingsDialog?.addEventListener('click', (event) => {
+    if (event.target === chartSettingsDialog) chartSettingsDialog.close();
+  });
+
+  closeSpectrumSettingsBtn?.addEventListener('click', closeSpectrumSettings);
+  spectrumSettingsDialog?.addEventListener('click', (event) => {
+    if (event.target === spectrumSettingsDialog) closeSpectrumSettings();
+  });
+  removeSpectrumFromDialogBtn?.addEventListener('click', () => {
+    const column = spectrumColumn(spectrumSettingsId?.value);
+    closeSpectrumSettings();
+    if (column) removeSeries(column);
+  });
+
+  detectPeaksBtn?.addEventListener('click', detectPeaks);
+
+  peakDetectionHelpBtn?.addEventListener('click', () => {
+    peakDetectionHelpDialog?.showModal();
+  });
+  closePeakDetectionHelpBtn?.addEventListener('click', () => {
+    if (peakDetectionHelpDialog?.open) peakDetectionHelpDialog.close();
+  });
+  peakDetectionHelpDialog?.addEventListener('click', (event) => {
+    if (event.target === peakDetectionHelpDialog) peakDetectionHelpDialog.close();
+  });
+
+  function renderPeakProcessingDiagnostics(processing, options = {}) {
+    if (!peakProcessingChart) return;
+    const compact = Boolean(options.compact);
+    peakProcessingChart.innerHTML = '';
+    const diagnostics = processing?.diagnostics;
+    if (!diagnostics?.x?.length) {
+      peakProcessingChart.textContent = t('peakProcessingEmpty');
+      return;
+    }
+    const xValues = diagnostics.x.map(Number);
+    const series = [
+      { key: 'signal', label: t('peakProcessingSignal'), color: '#2563eb', dash: null },
+      { key: 'baseline', label: t('peakProcessingBaseline'), color: '#dc2626', dash: '6,4' },
+      { key: 'corrected', label: t('peakProcessingCorrected'), color: '#16a34a', dash: null },
+      { key: 'broadCorrected', label: t('peakProcessingBroad'), color: '#9333ea', dash: '3,3' },
+    ].map((item) => ({ ...item, values: (diagnostics[item.key] || []).map(Number) }));
+    const points = series.flatMap((item) => item.values).filter(Number.isFinite);
+    if (!points.length) {
+      peakProcessingChart.textContent = t('peakProcessingEmpty');
+      return;
+    }
+    const width = Math.max(compact ? 420 : 640, peakProcessingChart.clientWidth || (compact ? 680 : 900));
+    const height = compact ? 300 : 360;
+    const margin = { top: 28, right: 16, bottom: 40, left: 54 };
+    const innerWidth = width - margin.left - margin.right;
+    const innerHeight = height - margin.top - margin.bottom;
+    const svg = d3.select(peakProcessingChart).append('svg')
+      .attr('viewBox', `0 0 ${width} ${height}`)
+      .attr('role', 'img')
+      .attr('aria-label', t('peakProcessingTitle'));
+    const x = d3.scaleLinear()
+      .domain([d3.max(xValues), d3.min(xValues)])
+      .range([0, innerWidth]);
+    const extent = d3.extent(points);
+    const padding = Math.max((extent[1] - extent[0]) * 0.08, 0.02);
+    const y = d3.scaleLinear()
+      .domain([extent[0] - padding, extent[1] + padding])
+      .nice()
+      .range([innerHeight, 0]);
+    const plot = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+    plot.append('g').attr('class', 'processing-grid')
+      .call(d3.axisLeft(y).tickSize(-innerWidth).tickFormat(''));
+    plot.append('g').attr('class', 'processing-axis')
+      .attr('transform', `translate(0,${innerHeight})`).call(d3.axisBottom(x));
+    plot.append('g').attr('class', 'processing-axis').call(d3.axisLeft(y));
+    const line = d3.line()
+      .defined((item) => Number.isFinite(item.x) && Number.isFinite(item.y))
+      .x((item) => x(item.x))
+      .y((item) => y(item.y));
+    series.forEach((item) => {
+      const values = item.values.slice(0, xValues.length).map((value, index) => ({ x: xValues[index], y: value }));
+      plot.append('path').datum(values).attr('class', 'processing-line')
+        .attr('d', line).attr('stroke', item.color)
+        .attr('stroke-dasharray', item.dash || null);
+    });
+    const legend = svg.append('g').attr('class', 'processing-legend').attr('transform', `translate(${margin.left},14)`);
+    let legendX = 0;
+    series.forEach((item) => {
+      const group = legend.append('g').attr('transform', `translate(${legendX},0)`);
+      group.append('line').attr('x1', 0).attr('x2', 22).attr('y1', 0).attr('y2', 0)
+        .attr('stroke', item.color).attr('stroke-width', 2).attr('stroke-dasharray', item.dash || null);
+      group.append('text').attr('x', 28).attr('y', 4).text(item.label);
+      legendX += item.key === 'broadCorrected' ? 170 : 130;
+    });
+    svg.append('text').attr('class', 'processing-axis-label').attr('x', width / 2).attr('y', height - 5)
+      .attr('text-anchor', 'middle').text('cm⁻¹');
+    if (peakProcessingMeta) {
+      peakProcessingMeta.textContent = `${processing.signalType || 'unknown'} · ${processing.baselineMethod || 'unknown'} / ${processing.baselineEngine || 'unknown'}`;
+    }
+  }
+
+  openPeakProcessingBtn?.addEventListener('click', () => {
+    if (!lastPeakProcessing || lastPeakProcessing.spectrumId !== activeSpectrumId) return;
+    renderPeakProcessingDiagnostics(lastPeakProcessing);
+    peakProcessingDialog?.showModal();
+  });
+  closePeakProcessingBtn?.addEventListener('click', () => {
+    if (peakProcessingDialog?.open) peakProcessingDialog.close();
+  });
+  peakProcessingDialog?.addEventListener('click', (event) => {
+    if (event.target === peakProcessingDialog) peakProcessingDialog.close();
+  });
+
+  openPeakSettingsBtn?.addEventListener('click', () => {
+    if (!lastData || !activeSpectrumId) return;
+    const applied = detectorAppliedSettings.get(activeSpectrumId);
+    if (detectorBaselineMethod && applied?.baselineMethod) detectorBaselineMethod.value = applied.baselineMethod;
+    peakDetectorSettingsDialog?.showModal();
+    previewPeakBaseline();
+  });
+  const closePeakSettings = () => {
+    if (peakDetectorSettingsDialog?.open) peakDetectorSettingsDialog.close();
+  };
+  closePeakSettingsBtn?.addEventListener('click', closePeakSettings);
+  cancelPeakSettingsBtn?.addEventListener('click', closePeakSettings);
+  peakDetectorSettingsDialog?.addEventListener('click', (event) => {
+    if (event.target === peakDetectorSettingsDialog) closePeakSettings();
+  });
+  applyPeakBaselineBtn?.addEventListener('click', applyPeakBaseline);
+  detectorBaselineMethod?.addEventListener('change', () => {
+    updateDetectorControls();
+    previewPeakBaseline();
+  });
+  detectorSignalType?.addEventListener('change', () => {
+    updateDetectorControls();
+    if (peakDetectorSettingsDialog?.open) previewPeakBaseline();
+  });
+
+  confirmAllPeaksBtn?.addEventListener('click', () => {
+    const candidates = Array.isArray(stripeSets.candidates) ? stripeSets.candidates : [];
+    if (!candidates.length) {
+      setStatus('No candidate peaks to confirm.', true);
+      return;
+    }
+    const confirmed = Array.isArray(stripeSets.confirmed) ? stripeSets.confirmed : [];
+    const confirmedIds = new Set(confirmed.map((stripe) => stripe.peakId || stripe.id));
+    const newConfirmed = candidates.filter((stripe) => !confirmedIds.has(stripe.peakId || stripe.id));
+    stripeSets.confirmed = [...confirmed, ...newConfirmed];
+    stripeSets.candidates = [];
+    activeStripeSet = 'confirmed';
+    stripeSetBtns.forEach((btn) => btn.classList.toggle('active', btn.dataset.set === 'confirmed'));
+    if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = true;
+    renderChartFromData(lastData);
+    renderStripesTable();
+    scheduleLocalSave();
+    setStatus(`Confirmed ${newConfirmed.length} peaks across ${lastSpectra.length} spectra.`);
+  });
+
+  togglePeaksTableBtn?.addEventListener('click', () => {
+    if (!peaksTableWrap) return;
+    const collapsed = !peaksTableWrap.hidden;
+    peaksTableWrap.hidden = collapsed;
+    togglePeaksTableBtn.setAttribute('aria-expanded', String(!collapsed));
+    togglePeaksTableBtn.title = collapsed ? 'Expand peaks table' : 'Collapse peaks table';
+    togglePeaksTableBtn.setAttribute('aria-label', togglePeaksTableBtn.title);
+    const icon = togglePeaksTableBtn.querySelector('.material-symbols-outlined');
+    if (icon) icon.textContent = collapsed ? 'unfold_more' : 'unfold_less';
   });
 
   const getBaselineParams = () => {
@@ -1866,12 +2579,24 @@ let localSaveTimer = null;
     const current = currentStripes();
     const color = stripeColors[current.length % stripeColors.length];
     stripeIdSeq += 1;
+    const spectrumId = markerSpectrumId || lastSpectra[0]?.id || null;
+    const peakId = `peak-${spectrumId || 'unassigned'}-${stripeIdSeq}`;
     const matches = tipsForX(xVal);
     const label = matches[0]?.class || matches[0]?.group || '';
     const tipText = matches
       .map((m) => [m.group, m.class, m.details].filter(Boolean).join(' — '))
       .join('; ');
-    stripeSets[activeStripeSet] = [...current, { id: `stripe-${stripeIdSeq}`, x: xVal, color, label, tip: tipText, labelSource: label ? 'peak-db' : 'empty' }];
+    stripeSets[activeStripeSet] = [...current, {
+      id: `stripe-${stripeIdSeq}`,
+      peakId,
+      spectrumId,
+      x: xVal,
+      color,
+      label,
+      tip: tipText,
+      labelSource: label ? 'peak-db' : 'empty',
+      source: 'manual',
+    }];
     renderChartFromData(lastData);
     renderStripesTable();
     scheduleLocalSave();
@@ -1998,6 +2723,9 @@ let localSaveTimer = null;
       yRange: { min: yMinInput.value, max: yMaxInput.value },
       customNames: Object.fromEntries(customNames),
       analysis: analysisData,
+      spectra: lastSpectra,
+      markerSpectrumId,
+      activeSpectrumId,
     };
     const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -2115,7 +2843,7 @@ let localSaveTimer = null;
       lastFilesRaw = payloadFiles;
       const downloadName = fileNameInput.value.trim() || 'merged.csv';
       setStatus(`${t('statusSending')} ${payloadFiles.length} files...`);
-      processFiles(payloadFiles, { fileName: downloadName });
+      processFiles(payloadFiles, { fileName: downloadName, markerSpectrumId: null });
     } catch (err) {
       console.error(err);
       setStatus(err.message, true);
@@ -2144,6 +2872,8 @@ let localSaveTimer = null;
       xRange: { min: xMinInput.value, max: xMaxInput.value },
       yRange: { min: yMinInput.value, max: yMaxInput.value },
       customNames: Object.fromEntries(customNames),
+      markerSpectrumId,
+      activeSpectrumId,
     });
   }
 
@@ -2165,7 +2895,13 @@ let localSaveTimer = null;
     lastColumns = [];
     lastParsedRows = [];
     lastData = null;
+    lastSpectra = [];
     lastFilesRaw = [];
+    lastPeakProcessing = null;
+    if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = true;
+    markerSpectrumId = null;
+    activeSpectrumId = null;
+    updateSpectrumSelector();
     visibleSeries = new Map();
     offsets = new Map();
     baselineModel = null;
@@ -2173,6 +2909,8 @@ let localSaveTimer = null;
     baselineSeries = null;
     baselineMap = new Map();
     stripeSets = { candidates: [], confirmed: [] };
+    detectorProcessedBySpectrum = new Map();
+    detectorAppliedSettings = new Map();
     analysisData = null;
     activeStripeSet = 'candidates';
     stripeIdSeq = 0;
@@ -2191,6 +2929,9 @@ let localSaveTimer = null;
 
   function removeSeries(col) {
     if (!col) return;
+    const removedSpectrumIds = new Set((lastData || [])
+      .filter((point) => point.file === col && point.spectrumId)
+      .map((point) => point.spectrumId));
     lastColumns = (lastColumns || []).filter((c) => c !== col);
     lastParsedRows = (lastParsedRows || []).map((row) => {
       const clone = { ...row };
@@ -2198,6 +2939,18 @@ let localSaveTimer = null;
       return clone;
     });
     lastData = (lastData || []).filter((d) => d.file !== col);
+    lastSpectra = (lastSpectra || []).filter((spectrum) => !removedSpectrumIds.has(spectrum.id));
+    removedSpectrumIds.forEach((spectrumId) => {
+      detectorProcessedBySpectrum.delete(spectrumId);
+      detectorAppliedSettings.delete(spectrumId);
+    });
+    Object.keys(stripeSets).forEach((setId) => {
+      stripeSets[setId] = (stripeSets[setId] || []).filter((stripe) => !removedSpectrumIds.has(stripe.spectrumId));
+    });
+    if (removedSpectrumIds.has(markerSpectrumId)) markerSpectrumId = lastSpectra[0]?.id || null;
+    if (removedSpectrumIds.has(activeSpectrumId)) activeSpectrumId = lastSpectra[0]?.id || null;
+    lastPeakProcessing = detectorProcessedBySpectrum.get(activeSpectrumId) || null;
+    updateDetectorControls();
     offsets.delete(col);
     visibleSeries.delete(col);
     customNames.delete(col);
@@ -2222,6 +2975,7 @@ let localSaveTimer = null;
     }
     defaultYRange = computeAdjustedExtent(lastData) || defaultYRange;
     updateBaselineSelectOptions();
+    updateSpectrumSelector();
     renderChartFromData(lastData);
     renderStripesTable();
     scheduleLocalSave();

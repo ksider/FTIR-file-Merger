@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FTIR Merger</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet" href="styles.css">
   <script src="./d3.min.js"></script>
   <script src="./jcampconverter.min.js"></script>
@@ -14,7 +15,7 @@
     <a href="/">Multitool</a><a href="/search/">Search</a><a href="/qr/">QR</a><a href="/pdf/">PDF</a><a href="/badge/">Badge</a><a href="/ftir/" aria-current="page">FTIR</a>
   </nav>
   <div class="bg-accent"></div>
-  <div class="app-shell">
+  <div class="app-shell container-fluid px-1">
     <header class="topbar surface">
       <div class="brand">
         <img src="logo.png" alt="FTIR Merger logo" class="brand-logo" />
@@ -70,14 +71,29 @@
         </div>
       </div>
 
+      <div class="chart-tabs-row">
+        <div id="chartLegend" class="spectrum-tabs nav nav-tabs" role="tablist" aria-label="Open spectra"></div>
+        <button id="openChartSettings" class="icon-btn chart-settings-trigger" type="button" title="Chart settings" aria-label="Chart settings" disabled>
+          <span class="material-symbols-outlined">tune</span>
+        </button>
+      </div>
       <div class="chart-row is-hidden" id="chartRow">
-        <div>
+        <div class="chart-main">
           <div id="zoneHint" class="zone-hint"></div>
           <div id="chart"></div>
         </div>
-        <div class="legend-wrap">
-          <div id="chartLegend" class="legend"></div>
-          <div id="chartControls" class="controls">
+      </div>
+    </div>
+
+    <dialog id="chartSettingsDialog" class="chart-settings-dialog">
+      <div class="dialog-header">
+        <div>
+          <div class="eyebrow">Chart settings</div>
+          <h3>View and processing</h3>
+        </div>
+        <button id="closeChartSettings" class="icon-btn" type="button" aria-label="Close chart settings">×</button>
+      </div>
+      <div id="chartControls" class="controls chart-settings-content">
             <h3 data-i18n="chartSettings">Chart settings</h3>
             <div class="control-group">
               <label data-i18n="xRange">X range (reverse):</label>
@@ -112,28 +128,49 @@
               <button id="resetZoom" type="button" class="icon-btn" disabled title="Reset zoom" aria-label="Reset zoom">
                 <span class="material-symbols-outlined">zoom_out_map</span>
               </button>
-              <div class="save-wrap">
-                <input id="fileName" type="text" class="save-name" value="merged.csv" aria-label="CSV file name">
-                <button id="saveCsv" type="button" class="btn success" disabled data-i18n="saveCsv">Save CSV</button>
-              </div>
             </div>
-          </div>
-        </div>
       </div>
-    </div>
+    </dialog>
 
     <div class="card surface peaks-card">
       <div class="peaks-header">
-        <h3 data-i18n="peaksTitle">Peaks / stripes</h3>
+        <div>
+          <h3 data-i18n="peaksTitle">Peaks / stripes</h3>
+          <div id="peaksSpectrumTitle" class="selected-spectrum-title">No spectrum selected</div>
+        </div>
+        <button id="togglePeaksTable" type="button" class="icon-btn" title="Collapse peaks table" aria-label="Collapse peaks table" aria-expanded="true" aria-controls="peaksTableWrap">
+          <span class="material-symbols-outlined">unfold_less</span>
+        </button>
         <div class="peaks-actions">
+          <div class="detector-toolbar">
+            <label for="detectorSignalType">Peak search</label>
+            <button id="peakDetectionHelp" type="button" class="icon-btn detector-help" title="Peak detector guide" aria-label="Peak detector guide">
+              <span class="material-symbols-outlined">help</span>
+            </button>
+            <button id="openPeakSettings" type="button" class="icon-btn detector-help" title="Peak processing settings" aria-label="Peak processing settings" disabled>
+              <span class="material-symbols-outlined">tune</span>
+            </button>
+            <select id="detectorSignalType" aria-label="Signal type">
+              <option value="unknown">Auto / unknown</option>
+              <option value="transmittance">%T transmittance</option>
+              <option value="absorbance">Absorbance / intensity</option>
+            </select>
+            <span id="detectorBaselineSummary" class="detector-baseline-summary">Baseline: arPLS</span>
+            <label class="detector-field" for="detectorMinProminence"><span>Prominence</span><input id="detectorMinProminence" type="number" min="0" step="0.01" value="0.02" aria-label="Minimum prominence" title="Minimum prominence"></label>
+            <label class="detector-field" for="detectorMinSeparation"><span>Distance</span><input id="detectorMinSeparation" type="number" min="0.1" step="0.1" value="8" aria-label="Minimum separation cm-1" title="Minimum separation (cm-1)"></label>
+            <label class="detector-field" for="detectorSmoothingWindow"><span>Smooth</span><input id="detectorSmoothingWindow" type="number" min="1" max="101" step="2" value="5" aria-label="Smoothing window" title="Smoothing window"></label>
+            <button id="detectPeaks" type="button" class="btn tonal" disabled>Detect</button>
+            <small id="detectorStatus">Not run.</small>
+          </div>
           <button id="addStripe" type="button" class="btn tonal" data-i18n="addStripe">Add stripe</button>
+          <button id="confirmAllPeaks" type="button" class="btn tonal" disabled title="Confirm all detected candidates across all spectra">Confirm all</button>
           <button id="copyStripes" type="button" class="btn tonal" data-i18n="copyStripes">Copy table</button>
           <button id="copyConfirmedPayload" type="button" class="btn tonal">Copy confirmed JSON</button>
           <button id="analyzeConfirmed" type="button" class="btn primary">Analyze confirmed</button>
           <p class="peaks-hint" data-i18n="peakHint">Click the chart to place a marker, then add it here.</p>
         </div>
       </div>
-      <div class="peaks-table">
+      <div id="peaksTableWrap" class="peaks-table">
         <div class="stripe-sets">
           <button class="stripe-set-btn active" data-set="candidates">Candidates</button>
           <button class="stripe-set-btn" data-set="confirmed">Confirmed</button>
@@ -149,6 +186,72 @@
         <div id="peaksBody" class="peaks-body"></div>
       </div>
     </div>
+    <dialog id="spectrumSettingsDialog" class="spectrum-settings-dialog">
+      <form method="dialog" id="spectrumSettingsForm">
+        <div class="dialog-header">
+          <div>
+            <div class="eyebrow">Spectrum settings</div>
+            <h3 id="spectrumSettingsTitle">Spectrum</h3>
+          </div>
+          <button type="button" class="icon-btn" id="closeSpectrumSettings" aria-label="Close settings">×</button>
+        </div>
+        <input id="spectrumSettingsId" type="hidden">
+        <label for="spectrumSettingsName">Display name</label>
+        <input id="spectrumSettingsName" type="text" maxlength="255">
+        <label for="spectrumSettingsOffset">Y offset</label>
+        <input id="spectrumSettingsOffset" type="number" step="0.1">
+        <div class="dialog-actions">
+          <button type="button" class="btn danger" id="removeSpectrumFromDialog">Remove spectrum</button>
+          <button type="submit" class="btn primary" id="saveSpectrumSettings">Save</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="peakDetectionHelpDialog" class="peak-help-dialog">
+      <div class="dialog-header">
+        <div>
+          <div class="eyebrow" data-i18n="peakHelpEyebrow">Peak search</div>
+          <h3 data-i18n="peakHelpTitle">Peak detector guide</h3>
+        </div>
+        <button id="closePeakDetectionHelp" class="icon-btn" type="button" aria-label="Close peak detector guide">×</button>
+      </div>
+      <p class="peak-help-intro" data-i18n="peakHelpIntro">These settings affect how automatic peaks are selected for the active spectrum.</p>
+      <div class="peak-help-list">
+        <section><h4 data-i18n="peakHelpSignalType">Signal type</h4><p data-i18n="peakHelpSignalTypeText">Transmittance (%T) is converted to absorbance, so absorption bands are detected as peaks. For absorbance or intensity, the values are used directly.</p></section>
+        <section><h4 data-i18n="peakHelpBaseline">Baseline method</h4><p data-i18n="peakHelpBaselineText">Removes slow background curvature before peak search. arPLS is the default. For very broad bands, compare the corrected curve and try Linear or None if the band is being removed.</p></section>
+        <section><h4 data-i18n="peakHelpProminence">Prominence</h4><p data-i18n="peakHelpProminenceText">Minimum contrast against the local baseline. Increase it to remove noise and weak shoulders; decrease it to find weaker bands.</p></section>
+        <section><h4 data-i18n="peakHelpDistance">Distance</h4><p data-i18n="peakHelpDistanceText">Minimum separation between peaks in cm⁻¹. Increase it when one broad band is split into many nearby peaks.</p></section>
+        <section><h4 data-i18n="peakHelpSmooth">Smooth</h4><p data-i18n="peakHelpSmoothText">Moving-average window in data points. Increase it for noisy spectra, but a large value can flatten narrow peaks. Use an odd number.</p></section>
+      </div>
+      <p class="peak-help-tip" data-i18n="peakHelpQuick">Quick start: try Prominence 0.02, Distance 8, Smooth 5, then adjust one setting at a time.</p>
+    </dialog>
+    <dialog id="peakDetectorSettingsDialog" class="peak-detector-settings-dialog">
+      <div class="dialog-header">
+        <div>
+          <div class="eyebrow" data-i18n="detectorBaselineEyebrow">Peak processing</div>
+          <h3 data-i18n="detectorBaselineTitle">Baseline correction</h3>
+        </div>
+        <button id="closePeakSettings" class="icon-btn" type="button" aria-label="Close baseline settings">×</button>
+      </div>
+      <p class="peak-help-intro" data-i18n="detectorBaselineIntro">Choose how the slow background is removed from the active spectrum. Apply the correction before searching peaks.</p>
+      <label for="detectorBaselineMethod" data-i18n="detectorBaseline">Baseline method</label>
+      <select id="detectorBaselineMethod" aria-label="Baseline method">
+        <option value="arpls">arPLS</option>
+        <option value="airpls">airPLS</option>
+        <option value="asls">AsLS</option>
+        <option value="snip">SNIP</option>
+        <option value="rubberband">Rubberband</option>
+        <option value="linear">Linear</option>
+        <option value="none">None</option>
+      </select>
+      <div class="peak-detector-settings-note" data-i18n="detectorBaselineNote">The main chart will switch to the corrected curve in the original display scale. Peak search will use the same applied correction.</div>
+      <div id="peakProcessingMeta" class="peak-processing-meta"></div>
+      <div id="peakProcessingChart" class="peak-processing-chart"></div>
+      <p class="peak-processing-hint" data-i18n="peakProcessingHint">The red line is the baseline used by the fine detector. The green curve is searched for peaks. The broad-pass detector keeps broad bands separately.</p>
+      <div class="dialog-actions">
+        <button id="cancelPeakSettings" type="button" class="btn tonal" data-i18n="cancel">Cancel</button>
+        <button id="applyPeakBaseline" type="button" class="btn primary" data-i18n="applyBaseline">Apply baseline</button>
+      </div>
+    </dialog>
     <div class="card surface analysis-card" id="analysisCard" hidden>
       <div class="peaks-header">
         <h3>LLM interpretation</h3>
