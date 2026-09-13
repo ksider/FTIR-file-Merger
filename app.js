@@ -29,6 +29,7 @@
   const spectrumSettingsTitle = document.getElementById('spectrumSettingsTitle');
   const spectrumSettingsName = document.getElementById('spectrumSettingsName');
   const spectrumSettingsOffset = document.getElementById('spectrumSettingsOffset');
+  const spectrumSettingsRole = document.getElementById('spectrumSettingsRole');
   const closeSpectrumSettingsBtn = document.getElementById('closeSpectrumSettings');
   const removeSpectrumFromDialogBtn = document.getElementById('removeSpectrumFromDialog');
   const detectorSignalType = document.getElementById('detectorSignalType');
@@ -78,6 +79,7 @@
   const copyStripesBtn = document.getElementById('copyStripes');
   const copyConfirmedPayloadBtn = document.getElementById('copyConfirmedPayload');
   const analyzeConfirmedBtn = document.getElementById('analyzeConfirmed');
+  const analysisPromptInput = document.getElementById('analysisPrompt');
   const analysisCard = document.getElementById('analysisCard');
   const analysisStatus = document.getElementById('analysisStatus');
   const analysisResult = document.getElementById('analysisResult');
@@ -104,6 +106,7 @@
 
   let lastData = null;
   let offsets = new Map();
+  let spectrumRoles = new Map();
   let lastParsedRows = [];
   let lastColumns = [];
   let lastSpectra = [];
@@ -116,6 +119,20 @@
   let markerStep = 1;
   let merging = false;
 let defaultYRange = null;
+// Hard navigation limits configured in the chart settings. The visible
+// viewport is stored separately and may zoom only inside these limits.
+let chartNavigationBounds = {
+  xMin: defaultXRange.min,
+  xMax: defaultXRange.max,
+  yMin: null,
+  yMax: null,
+};
+let chartViewport = {
+  xMin: defaultXRange.min,
+  xMax: defaultXRange.max,
+  yMin: null,
+  yMax: null,
+};
 const BASELINE_DISABLED = true;
 let stripeSets = {
   candidates: [],
@@ -142,7 +159,9 @@ let panQueued = null;
 let measurementState = null;
 let analysisData = null;
 const LOCAL_SESSION_KEY = 'ftir_merger_local_session_v1';
+const LOCAL_SETTINGS_KEY = 'ftir_merger_settings_v1';
 let localSaveTimer = null;
+let peaksTableCollapsed = false;
 
   const sanitizeName = (name) => (name || '').replace(/[^a-zA-Z0-9_-]+/g, '_') || 'col';
   const makeUniqueColumnName = (existing, raw) => {
@@ -177,6 +196,9 @@ let localSaveTimer = null;
       const key = el.getAttribute('data-i18n');
       if (key) el.textContent = t(key);
     });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+      el.placeholder = t(el.dataset.i18nPlaceholder);
+    });
     if (sampleInput) {
       sampleInput.placeholder = currentLang === 'ru' ? 'например, A1' : currentLang === 'sr' ? 'npr. A1' : 'e.g. A1';
     }
@@ -197,6 +219,8 @@ let localSaveTimer = null;
       console.warn('[FTIR language] unable to save language', { name: error.name, message: error.message });
     }
     applyTranslations();
+    saveLocalSettings();
+    if (lastFilesRaw.length) scheduleLocalSave();
   }
   function applyFooterLinks() {
     if (footerSite) {
@@ -221,6 +245,14 @@ let localSaveTimer = null;
   });
   setActiveStripeSet(activeStripeSet);
 
+  chartLegend?.addEventListener('click', (event) => {
+    if (event.target.closest('.spectrum-settings-btn')) return;
+    const tab = event.target.closest('.spectrum-tab');
+    if (!tab || !chartLegend.contains(tab)) return;
+    const spectrumId = tab.dataset.spectrumId;
+    if (spectrumId) setActiveSpectrum(spectrumId);
+  });
+
   langLinks.forEach((link) => {
     link.addEventListener('click', (e) => {
       e.preventDefault();
@@ -240,6 +272,130 @@ let localSaveTimer = null;
     if (typeof xMax === 'number') xMaxInput.value = String(xMax);
     if (yMin !== undefined) yMinInput.value = yMin === null ? '' : String(yMin);
     if (yMax !== undefined) yMaxInput.value = yMax === null ? '' : String(yMax);
+  }
+
+  function finiteNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function normalizeBounds(min, max, fallbackMin, fallbackMax) {
+    const lower = finiteNumber(min);
+    const upper = finiteNumber(max);
+    if (lower === null || upper === null || lower === upper) {
+      return { min: fallbackMin, max: fallbackMax };
+    }
+    return { min: Math.min(lower, upper), max: Math.max(lower, upper) };
+  }
+
+  function updateNavigationBoundsFromInputs() {
+    const xBounds = normalizeBounds(
+      xMinInput.value,
+      xMaxInput.value,
+      defaultXRange.min,
+      defaultXRange.max,
+    );
+    chartNavigationBounds.xMin = xBounds.min;
+    chartNavigationBounds.xMax = xBounds.max;
+    chartViewport.xMin = xBounds.min;
+    chartViewport.xMax = xBounds.max;
+    const yMin = finiteNumber(yMinInput.value);
+    const yMax = finiteNumber(yMaxInput.value);
+    if (yMin !== null && yMax !== null && yMin !== yMax) {
+      chartNavigationBounds.yMin = Math.min(yMin, yMax);
+      chartNavigationBounds.yMax = Math.max(yMin, yMax);
+      chartViewport.yMin = chartNavigationBounds.yMin;
+      chartViewport.yMax = chartNavigationBounds.yMax;
+    } else if (yMinInput.value === '' && yMaxInput.value === '') {
+      chartNavigationBounds.yMin = null;
+      chartNavigationBounds.yMax = null;
+      chartViewport.yMin = null;
+      chartViewport.yMax = null;
+    }
+  }
+
+  function setNavigationBounds(bounds = {}) {
+    const xBounds = normalizeBounds(
+      bounds.xMin,
+      bounds.xMax,
+      defaultXRange.min,
+      defaultXRange.max,
+    );
+    chartNavigationBounds.xMin = xBounds.min;
+    chartNavigationBounds.xMax = xBounds.max;
+    const yBounds = normalizeBounds(bounds.yMin, bounds.yMax, null, null);
+    chartNavigationBounds.yMin = yBounds.min;
+    chartNavigationBounds.yMax = yBounds.max;
+  }
+
+  function getNavigationBounds(autoExtent) {
+    const yFallback = Array.isArray(autoExtent) && autoExtent.length === 2
+      ? normalizeBounds(autoExtent[0], autoExtent[1], 0, 1)
+      : { min: 0, max: 1 };
+    return {
+      xMin: chartNavigationBounds.xMin,
+      xMax: chartNavigationBounds.xMax,
+      yMin: chartNavigationBounds.yMin ?? yFallback.min,
+      yMax: chartNavigationBounds.yMax ?? yFallback.max,
+    };
+  }
+
+  function getChartViewport(autoExtent) {
+    const navigationBounds = getNavigationBounds(autoExtent);
+    const yIsAuto = yMinInput?.value === '' && yMaxInput?.value === ''
+      && chartNavigationBounds.yMin === null
+      && chartNavigationBounds.yMax === null;
+    const yMin = yIsAuto ? null : finiteNumber(chartViewport.yMin);
+    const yMax = yIsAuto ? null : finiteNumber(chartViewport.yMax);
+    return {
+      xMin: finiteNumber(chartViewport.xMin) ?? navigationBounds.xMin,
+      xMax: finiteNumber(chartViewport.xMax) ?? navigationBounds.xMax,
+      yMin: yMin === null || yMax === null ? navigationBounds.yMin : Math.min(yMin, yMax),
+      yMax: yMin === null || yMax === null ? navigationBounds.yMax : Math.max(yMin, yMax),
+    };
+  }
+
+  function setChartViewport(viewport = {}, autoExtent = null) {
+    const hasDataExtent = Array.isArray(autoExtent)
+      && autoExtent.length === 2
+      && Number.isFinite(Number(autoExtent[0]))
+      && Number.isFinite(Number(autoExtent[1]));
+    const bounds = getNavigationBounds(hasDataExtent ? autoExtent : [0, 1]);
+    let xMin = finiteNumber(viewport.xMin) ?? bounds.xMin;
+    let xMax = finiteNumber(viewport.xMax) ?? bounds.xMax;
+    [xMin, xMax] = clampViewport(xMin, xMax, bounds.xMin, bounds.xMax);
+    const yMin = finiteNumber(viewport.yMin);
+    const yMax = finiteNumber(viewport.yMax);
+    let nextYMin = null;
+    let nextYMax = null;
+    if (yMin !== null && yMax !== null) {
+      [nextYMin, nextYMax] = chartNavigationBounds.yMin !== null && chartNavigationBounds.yMax !== null
+        ? clampViewport(yMin, yMax, bounds.yMin, bounds.yMax)
+        : hasDataExtent
+          ? clampViewport(yMin, yMax, bounds.yMin, bounds.yMax)
+          : [Math.min(yMin, yMax), Math.max(yMin, yMax)];
+    }
+    chartViewport = { xMin, xMax, yMin: nextYMin, yMax: nextYMax };
+  }
+
+  function clampViewport(min, max, boundsMin, boundsMax) {
+    const lower = Math.min(boundsMin, boundsMax);
+    const upper = Math.max(boundsMin, boundsMax);
+    const totalSpan = upper - lower;
+    if (!Number.isFinite(totalSpan) || totalSpan <= 0) return [lower, upper];
+    let nextMin = Math.min(min, max);
+    let nextMax = Math.max(min, max);
+    const span = nextMax - nextMin;
+    if (span >= totalSpan) return [lower, upper];
+    if (nextMin < lower) {
+      nextMax += lower - nextMin;
+      nextMin = lower;
+    }
+    if (nextMax > upper) {
+      nextMin -= nextMax - upper;
+      nextMax = upper;
+    }
+    return [Math.max(lower, nextMin), Math.min(upper, nextMax)];
   }
 
   function computeAdjustedExtent(dataset) {
@@ -668,15 +824,17 @@ let localSaveTimer = null;
     return autoScaleTransmittance(parseInfraredText(text));
   }
 
-  function applyZoom(factor, centerX, centerY) {
+  function applyZoom(factor, centerX, centerY, axes = {}) {
     if (!lastData || !lastData.length) return;
-    const currentXMax = Number(xMaxInput.value) || defaultXRange.max;
-    const currentXMin = Number(xMinInput.value) || defaultXRange.min;
+    const zoomX = axes.x !== false;
+    const zoomY = axes.y === true;
     const autoExtent = computeAdjustedExtent(lastData) || [0, 1];
-    const currentYMin = yMinInput.value === '' ? autoExtent[0] : Number(yMinInput.value);
-    const currentYMax = yMaxInput.value === '' ? autoExtent[1] : Number(yMaxInput.value);
-    const baseYMin = defaultYRange ? defaultYRange[0] : autoExtent[0];
-    const baseYMax = defaultYRange ? defaultYRange[1] : autoExtent[1];
+    const navigationBounds = getNavigationBounds(autoExtent);
+    const viewport = getChartViewport(autoExtent);
+    const currentXMin = viewport.xMin;
+    const currentXMax = viewport.xMax;
+    const currentYMin = viewport.yMin;
+    const currentYMax = viewport.yMax;
     const safeFactor = Math.min(Math.max(factor, 0.5), 1.8); // limit per tick
     const zoomRange = (min, max, center, f) => {
       const minOff = min - center;
@@ -686,33 +844,53 @@ let localSaveTimer = null;
       if (a < b) return [a, b];
       return [b, a];
     };
-    let [nextXMin, nextXMax] = zoomRange(currentXMin, currentXMax, centerX, safeFactor);
-    let [nextYMin, nextYMax] = zoomRange(currentYMin, currentYMax, centerY, safeFactor);
+    let [nextXMin, nextXMax] = zoomX
+      ? zoomRange(currentXMin, currentXMax, centerX, safeFactor)
+      : [currentXMin, currentXMax];
+    let [nextYMin, nextYMax] = zoomY
+      ? zoomRange(currentYMin, currentYMax, centerY, safeFactor)
+      : [currentYMin, currentYMax];
 
-    const minSpanX = (defaultXRange.max - defaultXRange.min) * 0.01;
-    const minSpanY = Math.abs(baseYMax - baseYMin) * 0.01 || 1;
-    if (Math.abs(nextXMax - nextXMin) < minSpanX) {
+    const minSpanX = (navigationBounds.xMax - navigationBounds.xMin) * 0.01;
+    const minSpanY = Math.abs(navigationBounds.yMax - navigationBounds.yMin) * 0.01 || 1;
+    if (zoomX && Math.abs(nextXMax - nextXMin) < minSpanX) {
       const half = minSpanX / 2;
       nextXMin = centerX - half;
       nextXMax = centerX + half;
     }
-    if (Math.abs(nextYMax - nextYMin) < minSpanY) {
+    if (zoomY && Math.abs(nextYMax - nextYMin) < minSpanY) {
       const half = minSpanY / 2;
       nextYMin = centerY - half;
       nextYMax = centerY + half;
     }
 
-    // Clamp back toward defaults on zoom-out
-    const isZoomOut = factor > 1;
-    if (isZoomOut) {
-      nextXMin = Math.max(nextXMin, defaultXRange.min);
-      nextXMax = Math.min(nextXMax, defaultXRange.max);
-      nextYMin = Math.max(nextYMin, baseYMin);
-      nextYMax = Math.min(nextYMax, baseYMax);
+    // The values configured in Chart settings are hard limits. Zooming out
+    // stops at them and keeps the current view inside the selected region.
+    if (zoomX) {
+      [nextXMin, nextXMax] = clampViewport(
+        nextXMin,
+        nextXMax,
+        navigationBounds.xMin,
+        navigationBounds.xMax,
+      );
+    }
+    if (zoomY) {
+      [nextYMin, nextYMax] = clampViewport(
+        nextYMin,
+        nextYMax,
+        navigationBounds.yMin,
+        navigationBounds.yMax,
+      );
     }
 
-    setRangeInputs({ xMax: nextXMax, xMin: nextXMin, yMin: nextYMin, yMax: nextYMax });
+    chartViewport = {
+      xMin: nextXMin,
+      xMax: nextXMax,
+      yMin: zoomY ? nextYMin : chartViewport.yMin,
+      yMax: zoomY ? nextYMax : chartViewport.yMax,
+    };
     renderChartFromData(lastData);
+    scheduleLocalSave();
   }
 
   function buildCsvFromRows(rows, columns) {
@@ -768,31 +946,40 @@ let localSaveTimer = null;
       }
     }
   });
-  if (sampleInput) sampleInput.addEventListener('input', generateName);
+  if (sampleInput) sampleInput.addEventListener('input', () => {
+    generateName();
+    scheduleLocalSave();
+  });
+  fileNameInput?.addEventListener('input', scheduleLocalSave);
   generateName();
 
   function renderChartFromData(data, options = {}) {
     const { skipLegend = false } = options;
     if (!window.d3) return;
     if (!data || !data.length) return;
-    // Once baseline correction is applied, replace only the active spectrum
-    // with the processed curve. Other spectra remain available for comparison
-    // and the raw source data stays untouched for export/session persistence.
-    let chartData = data;
-    const processed = detectorProcessedBySpectrum.get(activeSpectrumId);
-    const activePoint = data.find((item) => item.spectrumId === activeSpectrumId);
-    const displayCorrected = processed?.diagnostics?.displayCorrected;
-    const processedX = processed?.diagnostics?.x;
-    if (activePoint && Array.isArray(processedX) && Array.isArray(displayCorrected) && processedX.length && displayCorrected.length) {
+    // Replace every spectrum that has an applied correction. Keeping the
+    // series in the original spectrum order prevents tabs from moving when
+    // the selected spectrum changes. The raw source data remains untouched.
+    const rawBySpectrum = d3.group(data, (item) => item.spectrumId);
+    const spectrumOrder = Array.from(new Set(data.map((item) => item.spectrumId)));
+    const chartData = [];
+    spectrumOrder.forEach((spectrumId) => {
+      const rawRows = rawBySpectrum.get(spectrumId) || [];
+      const processed = detectorProcessedBySpectrum.get(spectrumId);
+      const processedX = processed?.diagnostics?.x;
+      const displayCorrected = processed?.diagnostics?.displayCorrected;
+      if (!rawRows.length || !Array.isArray(processedX) || !Array.isArray(displayCorrected)
+        || !processedX.length || !displayCorrected.length) {
+        chartData.push(...rawRows);
+        return;
+      }
       const processedRows = processedX.map((xValue, index) => ({
-        ...activePoint,
+        ...rawRows[0],
         x: Number(xValue),
         y: Number(displayCorrected[index]),
       })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-      if (processedRows.length) {
-        chartData = data.filter((item) => item.spectrumId !== activeSpectrumId).concat(processedRows);
-      }
-    }
+      chartData.push(...(processedRows.length ? processedRows : rawRows));
+    });
     const filteredRaw = chartData.filter((d) => typeof d.x === 'number' && typeof d.y === 'number' && d.x <= defaultXRange.max && d.x >= defaultXRange.min);
     const filtered = filteredRaw.map((d) => {
       const base = baselineSeries ? baselineMap.get(d.x) : undefined;
@@ -810,10 +997,11 @@ let localSaveTimer = null;
     const filteredVisible = filtered.filter((d) => visibleSeries.get(d.file) !== false);
     const byFile = d3.group(filteredVisible, (d) => d.file);
     const yDomainAuto = d3.extent(filtered, (d) => d.y);
-    const xMaxVal = Number(xMaxInput.value) || defaultXRange.max;
-    const xMinVal = Number(xMinInput.value) || defaultXRange.min;
-    const yMinVal = yMinInput.value === '' ? yDomainAuto[0] : Number(yMinInput.value);
-    const yMaxVal = yMaxInput.value === '' ? yDomainAuto[1] : Number(yMaxInput.value);
+    const viewport = getChartViewport(yDomainAuto);
+    const xMaxVal = viewport.xMax;
+    const xMinVal = viewport.xMin;
+    const yMinVal = viewport.yMin;
+    const yMaxVal = viewport.yMax;
     const margin = { top: 20, right: 20, bottom: 40, left: 60 };
     const width = chartEl.clientWidth || 800;
     const height = Math.max(520, Math.round((window.innerHeight || 900) * 0.72));
@@ -949,10 +1137,13 @@ let localSaveTimer = null;
         const point = lastData.find((item) => item.file === file);
         const spectrumId = point?.spectrumId || file;
         const spectrum = lastSpectra.find((item) => item.id === spectrumId);
-        const item = document.createElement('div');
+        const item = document.createElement('button');
+        item.type = 'button';
         item.className = 'spectrum-tab nav-link';
+        item.dataset.spectrumId = spectrumId;
         item.setAttribute('role', 'tab');
         item.setAttribute('aria-selected', String(activeSpectrumId === spectrumId));
+        item.setAttribute('aria-controls', 'chart');
         if (activeSpectrumId === spectrumId) item.classList.add('active');
         if (visibleSeries.get(file) === false) item.classList.add('inactive');
         const swatch = document.createElement('div');
@@ -975,9 +1166,6 @@ let localSaveTimer = null;
         item.appendChild(swatch);
         item.appendChild(label);
         item.appendChild(gearBtn);
-        item.addEventListener('click', () => {
-          setActiveSpectrum(spectrumId);
-        });
         chartLegend.appendChild(item);
       }
     }
@@ -1106,14 +1294,15 @@ let localSaveTimer = null;
     svg.on('pointerdown', (event) => {
       const [px, py] = d3.pointer(event, g.node());
       if (isPanEvent(event)) {
+        const viewport = getChartViewport(yDomainAuto);
         isPanning = true;
         panStartDomain = {
           x: x.invert(px),
           y: y.invert(py),
-          xMin: Number(xMinInput.value) || defaultXRange.min,
-          xMax: Number(xMaxInput.value) || defaultXRange.max,
-          yMin: yMinVal,
-          yMax: yMaxVal,
+          xMin: viewport.xMin,
+          xMax: viewport.xMax,
+          yMin: viewport.yMin,
+          yMax: viewport.yMax,
         };
         svg.style('cursor', 'grab');
         return;
@@ -1132,24 +1321,34 @@ let localSaveTimer = null;
         const currentY = y.invert(py);
         const dx = currentX - panStartDomain.x;
         const dy = currentY - panStartDomain.y;
-        const newXMin = panStartDomain.xMin - dx;
-        const newXMax = panStartDomain.xMax - dx;
+        let newXMin = panStartDomain.xMin - dx;
+        let newXMax = panStartDomain.xMax - dx;
         let newYMin = panStartDomain.yMin - dy;
         let newYMax = panStartDomain.yMax - dy;
-        const baseRange = defaultYRange || yDomainAuto;
-        if (baseRange && baseRange.length === 2) {
-          newYMin = Math.max(newYMin, baseRange[0]);
-          newYMax = Math.min(newYMax, baseRange[1]);
-        }
+        const navigationBounds = getNavigationBounds(yDomainAuto);
+        [newXMin, newXMax] = clampViewport(
+          newXMin,
+          newXMax,
+          navigationBounds.xMin,
+          navigationBounds.xMax,
+        );
+        [newYMin, newYMax] = clampViewport(
+          newYMin,
+          newYMax,
+          navigationBounds.yMin,
+          navigationBounds.yMax,
+        );
         panQueued = { newXMin, newXMax, newYMin, newYMax };
         if (!panRaf) {
           panRaf = requestAnimationFrame(() => {
             if (panQueued) {
               const { newXMin: qMinX, newXMax: qMaxX, newYMin: qMinY, newYMax: qMaxY } = panQueued;
-              xMinInput.value = qMinX;
-              xMaxInput.value = qMaxX;
-              yMinInput.value = String(qMinY);
-              yMaxInput.value = String(qMaxY);
+              chartViewport = {
+                xMin: qMinX,
+                xMax: qMaxX,
+                yMin: qMinY,
+                yMax: qMaxY,
+              };
               renderChartFromData(lastData, { skipLegend: true });
             }
             panQueued = null;
@@ -1198,58 +1397,41 @@ let localSaveTimer = null;
       }
     });
 
-    svg.on(
-      'wheel',
-      (event) => {
-        event.preventDefault();
-        const delta = event.deltaY;
-        const factor = Math.exp(delta * 0.0008);
-        const [px, py] = d3.pointer(event, g.node());
-        const xVal = x.invert(px);
-        const yVal = y.invert(py);
-        applyZoom(factor, xVal, yVal);
-      },
-      { passive: false }
-    );
-    const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
     const handleKeyPan = (event) => {
       if (!lastData) return;
       const key = event.key;
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(key)) return;
       event.preventDefault();
-      const baseXMin = defaultXRange.min;
-      const baseXMax = defaultXRange.max;
-      const xSpan = Math.abs((Number(xMaxInput.value) || baseXMax) - (Number(xMinInput.value) || baseXMin)) || Math.abs(baseXMax - baseXMin);
-      const ySpanDefault = defaultYRange ? Math.abs(defaultYRange[1] - defaultYRange[0]) : Math.abs(yDomainAuto[1] - yDomainAuto[0]);
-      const ySpanCurrent = Math.abs((yMaxInput.value === '' ? yDomainAuto[1] : Number(yMaxInput.value)) - (yMinInput.value === '' ? yDomainAuto[0] : Number(yMinInput.value))) || ySpanDefault || 1;
+      const navigationBounds = getNavigationBounds(yDomainAuto);
+      const viewport = getChartViewport(yDomainAuto);
+      const baseXMin = navigationBounds.xMin;
+      const baseXMax = navigationBounds.xMax;
+      const xSpan = Math.abs(viewport.xMax - viewport.xMin) || Math.abs(baseXMax - baseXMin);
+      const ySpanCurrent = Math.abs(viewport.yMax - viewport.yMin) || Math.abs(navigationBounds.yMax - navigationBounds.yMin) || 1;
       const stepX = xSpan * 0.05;
       const stepY = ySpanCurrent * 0.05;
-      let currXMin = Number(xMinInput.value) || baseXMin;
-      let currXMax = Number(xMaxInput.value) || baseXMax;
-      let currYMin = yMinInput.value === '' ? yDomainAuto[0] : Number(yMinInput.value);
-      let currYMax = yMaxInput.value === '' ? yDomainAuto[1] : Number(yMaxInput.value);
-      const baseYMin = defaultYRange ? defaultYRange[0] : yDomainAuto[0];
-      const baseYMax = defaultYRange ? defaultYRange[1] : yDomainAuto[1];
+      let currXMin = viewport.xMin;
+      let currXMax = viewport.xMax;
+      let currYMin = viewport.yMin;
+      let currYMax = viewport.yMax;
       if (key === 'ArrowLeft') {
-        currXMin = clamp(currXMin + stepX, baseXMin, baseXMax - stepX);
-        currXMax = clamp(currXMax + stepX, baseXMin + stepX, baseXMax);
+        [currXMin, currXMax] = clampViewport(currXMin + stepX, currXMax + stepX, baseXMin, baseXMax);
       }
       if (key === 'ArrowRight') {
-        currXMin = clamp(currXMin - stepX, baseXMin, baseXMax - stepX);
-        currXMax = clamp(currXMax - stepX, baseXMin + stepX, baseXMax);
+        [currXMin, currXMax] = clampViewport(currXMin - stepX, currXMax - stepX, baseXMin, baseXMax);
       }
       if (key === 'ArrowUp') {
-        currYMin = clamp(currYMin + stepY, baseYMin, baseYMax - stepY);
-        currYMax = clamp(currYMax + stepY, baseYMin + stepY, baseYMax);
+        [currYMin, currYMax] = clampViewport(currYMin + stepY, currYMax + stepY, navigationBounds.yMin, navigationBounds.yMax);
       }
       if (key === 'ArrowDown') {
-        currYMin = clamp(currYMin - stepY, baseYMin, baseYMax - stepY);
-        currYMax = clamp(currYMax - stepY, baseYMin + stepY, baseYMax);
+        [currYMin, currYMax] = clampViewport(currYMin - stepY, currYMax - stepY, navigationBounds.yMin, navigationBounds.yMax);
       }
-      xMinInput.value = currXMin;
-      xMaxInput.value = currXMax;
-      yMinInput.value = String(currYMin);
-      yMaxInput.value = String(currYMax);
+      chartViewport = {
+        xMin: currXMin,
+        xMax: currXMax,
+        yMin: currYMin,
+        yMax: currYMax,
+      };
       renderChartFromData(lastData, { skipLegend: true });
     };
     svg.on('keydown', handleKeyPan);
@@ -1292,6 +1474,7 @@ let localSaveTimer = null;
         id: spectrumId,
         name: name || columnName || 'spectrum',
         sourceFile: sourceFile || name || columnName || 'spectrum',
+        role: spectrumRoles.get(spectrumId) || 'unknown',
         signalType: 'unknown',
         xUnit: 'cm-1',
         points: validPoints.map(([x, y]) => [Number(x), Number(y)]),
@@ -1377,9 +1560,9 @@ let localSaveTimer = null;
       return;
     }
     lastData = series;
+    detectorProcessedBySpectrum = new Map(Object.entries(opts.detectorProcessedBySpectrum || {}));
+    detectorAppliedSettings = new Map(Object.entries(opts.detectorAppliedSettings || {}));
     lastPeakProcessing = null;
-    detectorProcessedBySpectrum = new Map();
-    detectorAppliedSettings = new Map();
     if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = true;
     defaultYRange = computeAdjustedExtent(series) || d3.extent(series, (d) => d.y);
     stripeSets = opts.stripeSets || stripeSets;
@@ -1394,10 +1577,23 @@ let localSaveTimer = null;
     });
     markerSpectrumId = opts.markerSpectrumId !== undefined ? opts.markerSpectrumId : defaultSpectrumId;
     activeSpectrumId = opts.activeSpectrumId || markerSpectrumId || defaultSpectrumId;
+    lastPeakProcessing = detectorProcessedBySpectrum.get(activeSpectrumId) || null;
+    const activeDetectorSettings = detectorAppliedSettings.get(activeSpectrumId);
+    if (activeDetectorSettings) {
+      if (detectorBaselineMethod && activeDetectorSettings.baselineMethod) detectorBaselineMethod.value = activeDetectorSettings.baselineMethod;
+      if (detectorSignalType && activeDetectorSettings.signalType) detectorSignalType.value = activeDetectorSettings.signalType;
+    }
     baselinePreviewModel = null;
-    baselineModel = null;
-    baselineSeries = null;
+    baselineModel = opts.baselineModel || null;
+    baselineSeries = opts.baselineSeries || null;
     baselineMap = new Map();
+    if (baselineSeries && baselineModel?.coeffs) {
+      const rebuiltBaseline = buildBaselinePoly(baselineSeries, Number(baselineModel.degree) || 2);
+      if (rebuiltBaseline) {
+        baselineModel = rebuiltBaseline;
+        baselineMap = rebuiltBaseline.map;
+      }
+    }
     offsets = new Map();
     cols.forEach((col) => offsets.set(col, (opts.offsets && opts.offsets[col]) || 0));
     customNames = new Map(Object.entries(opts.customNames || {}));
@@ -1418,6 +1614,17 @@ let localSaveTimer = null;
     if (opts.yRange) {
       yMinInput.value = opts.yRange.min ?? '';
       yMaxInput.value = opts.yRange.max ?? '';
+    }
+    if (opts.chartBounds) setNavigationBounds(opts.chartBounds);
+    if (opts.viewport) {
+      setChartViewport(opts.viewport, defaultYRange);
+    } else if (opts.chartBounds) {
+      setChartViewport(opts.chartBounds, defaultYRange);
+    }
+    if (yMinInput.value === '' && yMaxInput.value === ''
+      && chartNavigationBounds.yMin === null && chartNavigationBounds.yMax === null) {
+      chartViewport.yMin = null;
+      chartViewport.yMax = null;
     }
     downloadLinkEl.textContent = '';
     if (failedFiles.length) {
@@ -1482,6 +1689,7 @@ let localSaveTimer = null;
     lastPeakProcessing = detectorProcessedBySpectrum.get(spectrumId) || null;
     if (detectorBaselineMethod && detectorAppliedSettings.has(spectrumId)) {
       detectorBaselineMethod.value = detectorAppliedSettings.get(spectrumId).baselineMethod || detectorBaselineMethod.value;
+      if (detectorSignalType) detectorSignalType.value = detectorAppliedSettings.get(spectrumId).signalType || detectorSignalType.value;
     }
     updateDetectorControls();
     if (openPeakProcessingBtn) {
@@ -1505,6 +1713,7 @@ let localSaveTimer = null;
     spectrumSettingsTitle.textContent = spectrum.name || spectrumId;
     spectrumSettingsName.value = customNames.get(column) || spectrum.name || spectrumId;
     spectrumSettingsOffset.value = offsets.get(column) || 0;
+    spectrumSettingsRole.value = spectrum.role || spectrumRoles.get(spectrumId) || 'unknown';
     spectrumSettingsDialog.showModal();
   }
 
@@ -1513,19 +1722,29 @@ let localSaveTimer = null;
   }
 
   function buildPeakDetectionPayload(options = {}) {
+    const spectrumId = options.spectrumId || activeSpectrumId;
     const selectedSignalType = detectorSignalType?.value;
     const selectedBaselineMethod = detectorBaselineMethod?.value || 'arpls';
     const forcedBaselineMethod = options.baselineMethodOverride || null;
-    const appliedBaseline = detectorAppliedSettings.get(activeSpectrumId);
+    const appliedBaseline = detectorAppliedSettings.get(spectrumId);
     const baselineIsCurrent = appliedBaseline
       && appliedBaseline.baselineMethod === selectedBaselineMethod
       && appliedBaseline.signalType === (selectedSignalType || 'unknown');
+    const viewport = getChartViewport(computeAdjustedExtent(lastData) || [0, 1]);
+    const searchRangeCm1 = {
+      min: Math.min(viewport.xMin, viewport.xMax),
+      max: Math.max(viewport.xMin, viewport.xMax),
+    };
+    const targetSpectra = options.allSpectra
+      ? lastSpectra
+      : lastSpectra.filter((spectrum) => spectrum.id === spectrumId);
     return {
       schemaVersion: '2.0',
-      spectra: lastSpectra.filter((spectrum) => spectrum.id === activeSpectrumId).map((spectrum) => ({
+      spectra: targetSpectra.map((spectrum) => ({
         id: spectrum.id,
         name: spectrum.name,
         sourceFile: spectrum.sourceFile,
+        role: spectrum.role || spectrumRoles.get(spectrum.id) || 'unknown',
         signalType: selectedSignalType && selectedSignalType !== 'unknown'
           ? selectedSignalType
           : spectrum.signalType || 'unknown',
@@ -1549,12 +1768,14 @@ let localSaveTimer = null;
         minProminence: Math.max(0, Number(detectorMinProminence?.value) || 0),
         minSeparationCm1: Math.max(0.1, Number(detectorMinSeparation?.value) || 8),
         maxPeaks: 300,
+        searchRangeCm1,
       },
     };
   }
 
   async function requestPeakProcessing(options = {}) {
     const payload = buildPeakDetectionPayload(options);
+    const spectrumId = options.spectrumId || activeSpectrumId;
     const response = await fetch(peakDetectionApi, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1563,21 +1784,24 @@ let localSaveTimer = null;
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `Peak detection failed (${response.status})`);
     const processing = Array.isArray(body.processing)
-      ? body.processing.find((item) => item.spectrumId === activeSpectrumId)
+      ? body.processing.find((item) => item.spectrumId === spectrumId)
       : null;
     if (!processing) throw new Error('The server returned no processing data for the active spectrum.');
-    return { payload, body, processing };
+    return { payload, body, processing, spectrumId };
   }
 
   let baselinePreviewRequest = 0;
+  let baselineApplyRequest = 0;
   async function previewPeakBaseline() {
     if (!activeSpectrumId || !lastData?.length || !peakProcessingChart) return;
+    const spectrumId = activeSpectrumId;
     const requestId = ++baselinePreviewRequest;
     if (peakProcessingMeta) peakProcessingMeta.textContent = t('detectorPreviewing');
     peakProcessingChart.textContent = t('detectorPreviewing');
     try {
       const { processing } = await requestPeakProcessing({
         baselineMethodOverride: detectorBaselineMethod?.value || 'arpls',
+        spectrumId,
       });
       if (requestId !== baselinePreviewRequest) return;
       renderPeakProcessingDiagnostics(processing, { compact: true });
@@ -1590,18 +1814,37 @@ let localSaveTimer = null;
 
   async function applyPeakBaseline() {
     if (!activeSpectrumId || !lastData?.length) return;
+    const spectrumId = activeSpectrumId;
+    const requestId = ++baselineApplyRequest;
+    const selectedBaselineMethod = detectorBaselineMethod?.value || 'arpls';
+    const selectedSignalType = detectorSignalType?.value || 'unknown';
     if (applyPeakBaselineBtn) applyPeakBaselineBtn.disabled = true;
     if (detectorStatus) detectorStatus.textContent = t('detectorApplying');
     try {
-      const { processing } = await requestPeakProcessing({
-        baselineMethodOverride: detectorBaselineMethod?.value || 'arpls',
+      const { body, processing } = await requestPeakProcessing({
+        baselineMethodOverride: selectedBaselineMethod,
+        spectrumId,
+        allSpectra: true,
       });
-      detectorProcessedBySpectrum.set(activeSpectrumId, processing);
-      detectorAppliedSettings.set(activeSpectrumId, {
-        baselineMethod: detectorBaselineMethod?.value || 'arpls',
-        signalType: detectorSignalType?.value || 'unknown',
+      const processedItems = Array.isArray(body.processing) ? body.processing : [];
+      processedItems.forEach((item) => {
+        if (!item?.spectrumId) return;
+        detectorProcessedBySpectrum.set(item.spectrumId, item);
+        detectorAppliedSettings.set(item.spectrumId, {
+          baselineMethod: selectedBaselineMethod,
+          signalType: selectedSignalType,
+        });
       });
-      lastPeakProcessing = processing;
+      // Applying a baseline is scoped to the spectrum that was selected when
+      // the request started. A redraw must never leave the UI on a different
+      // spectrum because another async handler changed the global selection.
+      if (requestId !== baselineApplyRequest) return;
+      if (activeSpectrumId !== spectrumId) {
+        activeSpectrumId = spectrumId;
+        markerSpectrumId = spectrumId;
+        updateSpectrumSelector();
+      }
+      lastPeakProcessing = detectorProcessedBySpectrum.get(activeSpectrumId) || null;
       updateDetectorControls();
       renderChartFromData(lastData);
       if (peakDetectorSettingsDialog?.open) peakDetectorSettingsDialog.close();
@@ -1621,6 +1864,9 @@ let localSaveTimer = null;
       setStatus('Load at least one spectrum before detecting peaks.', true);
       return;
     }
+    const spectrumId = activeSpectrumId;
+    const selectedBaselineMethod = detectorBaselineMethod?.value || 'arpls';
+    const selectedSignalType = detectorSignalType?.value || 'unknown';
     const payload = buildPeakDetectionPayload();
     if (detectorStatus) detectorStatus.textContent = `Detecting in ${payload.spectra.length} spectra...`;
     if (detectPeaksBtn) {
@@ -1628,35 +1874,40 @@ let localSaveTimer = null;
       detectPeaksBtn.dataset.busy = 'true';
     }
     try {
-      const { body, processing: responseProcessing } = await requestPeakProcessing();
+      const { body, processing: responseProcessing } = await requestPeakProcessing({ spectrumId });
       const detected = Array.isArray(body.peakObservations) ? body.peakObservations : [];
+      const searchRange = payload.settings.searchRangeCm1;
+      const detectedInRange = detected.filter((peak) => {
+        const nu = Number(peak.nu ?? peak.wavenumber ?? peak.peak);
+        return Number.isFinite(nu) && nu >= searchRange.min && nu <= searchRange.max;
+      });
       const processing = responseProcessing;
-      detectorProcessedBySpectrum.set(activeSpectrumId, processing);
+      detectorProcessedBySpectrum.set(spectrumId, processing);
       if (payload.settings.baselineMethod === 'none') {
         // A raw search must not turn an unapplied selection into an applied
         // baseline. The next parameter change should remain a raw search.
-        detectorAppliedSettings.delete(activeSpectrumId);
+        detectorAppliedSettings.delete(spectrumId);
       } else {
-        detectorAppliedSettings.set(activeSpectrumId, {
-          baselineMethod: detectorBaselineMethod?.value || 'arpls',
-          signalType: detectorSignalType?.value || 'unknown',
+        detectorAppliedSettings.set(spectrumId, {
+          baselineMethod: selectedBaselineMethod,
+          signalType: selectedSignalType,
         });
       }
-      lastPeakProcessing = processing;
+      lastPeakProcessing = detectorProcessedBySpectrum.get(activeSpectrumId) || null;
       if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = !processing?.diagnostics?.x?.length;
       const existingCandidates = stripeSets.candidates || [];
       // Re-running detection refreshes only the automatic candidates for the
       // active spectrum. Manual candidates and results from other spectra must
       // stay untouched.
       const retainedCandidates = existingCandidates.filter((stripe) => (
-        stripe.source !== 'automatic' || stripe.spectrumId !== activeSpectrumId
+        stripe.source !== 'automatic' || stripe.spectrumId !== spectrumId
       ));
       stripeSets.candidates = [
         ...retainedCandidates,
-        ...detected.map((peak, index) => ({
+        ...detectedInRange.map((peak, index) => ({
           id: peak.id || `stripe-auto-${index + 1}`,
           peakId: peak.id || `peak-auto-${index + 1}`,
-          spectrumId: peak.spectrumId || activeSpectrumId,
+          spectrumId: peak.spectrumId || spectrumId,
           x: Number(peak.nu),
           color: stripeColors[index % stripeColors.length],
           label: '',
@@ -1669,6 +1920,9 @@ let localSaveTimer = null;
           fwhmCm1: peak.fwhmCm1,
           intensity: Number.isFinite(Number(peak.confidence)) ? Math.round(Number(peak.confidence) * 100) : null,
           shape: peak.shape,
+          qualityFlags: Array.isArray(peak.qualityFlags)
+            ? peak.qualityFlags.filter((flag) => flag !== 'manual_estimate_fallback')
+            : [],
           localWindow: peak.localWindow,
         })),
       ];
@@ -1677,12 +1931,12 @@ let localSaveTimer = null;
         const baselineInfo = processing?.baselineMethod
           ? ` · ${processing.baselineMethod}/${processing.baselineEngine || 'baseline'} · ${processing.signalType || 'unknown'}`
           : '';
-        detectorStatus.textContent = `${detected.length} candidates · ${body.engine || 'detector'}${baselineInfo}`;
+        detectorStatus.textContent = `${detectedInRange.length} candidates · ${body.engine || 'detector'}${baselineInfo}`;
       }
       renderChartFromData(lastData);
       renderStripesTable();
       scheduleLocalSave();
-      setStatus(`Detected ${detected.length} peaks across ${payload.spectra.length} spectra.`);
+      setStatus(`Detected ${detectedInRange.length} peaks in ${searchRange.min}–${searchRange.max} cm⁻¹.`);
     } catch (error) {
       console.error('[FTIR peak detection] request.failed', { url: peakDetectionApi, message: error.message });
       if (detectorStatus) detectorStatus.textContent = error.message || 'Detector unavailable.';
@@ -1698,6 +1952,12 @@ let localSaveTimer = null;
     return activeSpectrumId ? stripes.filter((stripe) => stripe.spectrumId === activeSpectrumId) : stripes;
   }
 
+  function activeSpectrumCandidates() {
+    return activeSpectrumId
+      ? (stripeSets.candidates || []).filter((stripe) => stripe.spectrumId === activeSpectrumId)
+      : [];
+  }
+
   function findNearestSpectrumPoint(xVal, spectrumId = null) {
     let nearest = null;
     let bestDistance = Infinity;
@@ -1711,6 +1971,137 @@ let localSaveTimer = null;
       }
     }
     return nearest;
+  }
+
+  function medianValue(values) {
+    const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  function estimateManualPeakParameters(centerX, spectrumId) {
+    const spectrum = lastSpectra.find((item) => item.id === spectrumId);
+    const points = (lastData || [])
+      .filter((point) => point.spectrumId === spectrumId && Number.isFinite(point.x) && Number.isFinite(point.y))
+      .map((point) => ({ x: Number(point.x), rawY: Number(point.y) }))
+      .sort((a, b) => a.x - b.x);
+    if (!points.length) return {};
+
+    const requestedType = detectorSignalType?.value || spectrum?.signalType || 'unknown';
+    const minRaw = Math.min(...points.map((point) => point.rawY));
+    const maxRaw = Math.max(...points.map((point) => point.rawY));
+    const isTransmittance = requestedType === 'transmittance'
+      || (requestedType === 'unknown' && minRaw >= -1e-6 && maxRaw <= 110 && (maxRaw > 20 || maxRaw - minRaw > 5));
+    const toAbsorption = (rawY) => {
+      if (!isTransmittance) return rawY;
+      const transmittance = rawY * (maxRaw <= 2 ? 100 : 1);
+      return Math.log10(100 / Math.max(transmittance, 1e-9));
+    };
+    const signalValues = points.map((point) => toAbsorption(point.rawY));
+    const globalBaseline = medianValue(signalValues);
+    const nearestIndex = points.reduce((best, point, index) => (
+      Math.abs(point.x - centerX) < Math.abs(points[best].x - centerX) ? index : best
+    ), 0);
+    const fallbackParameters = (flags = []) => {
+      const fallbackHeight = Number.isFinite(globalBaseline)
+        ? Math.max(0, signalValues[nearestIndex] - globalBaseline)
+        : 0;
+      const fallbackRange = Math.max(...signalValues) - Math.min(...signalValues);
+      return {
+        originalNu: points[nearestIndex].x,
+        height: Number(fallbackHeight.toFixed(6)),
+        prominence: Number(fallbackHeight.toFixed(6)),
+        widthCm1: null,
+        fwhmCm1: null,
+        shape: 'unknown',
+        direction: 'absorption',
+        confidence: fallbackRange > 0 ? Number(Math.min(1, Math.max(0, fallbackHeight / fallbackRange)).toFixed(4)) : 0,
+        intensity: fallbackRange > 0 ? Math.round(Math.min(100, Math.max(0, (fallbackHeight / fallbackRange) * 100))) : 0,
+        qualityFlags: flags,
+      };
+    };
+    const xSteps = points.slice(1).map((point, index) => Math.abs(point.x - points[index].x)).filter((step) => step > 0);
+    const xStep = medianValue(xSteps) || 1;
+    const halfWindow = Math.max(160, Math.min(700, xStep * 160));
+    const local = points
+      .filter((point) => Math.abs(point.x - centerX) <= halfWindow)
+      .map((point) => ({ ...point, signal: toAbsorption(point.rawY) }));
+    if (local.length < 5) return fallbackParameters();
+
+    const clickIndex = local.reduce((best, point, index) => (
+      Math.abs(point.x - centerX) < Math.abs(local[best].x - centerX) ? index : best
+    ), 0);
+    const apexWindow = Math.max(10, Math.min(45, xStep * 8));
+    const apexCandidates = local
+      .map((point, index) => ({ point, index }))
+      .filter(({ point }) => Math.abs(point.x - local[clickIndex].x) <= apexWindow);
+    const centerIndex = (apexCandidates.length ? apexCandidates : [{ point: local[clickIndex], index: clickIndex }])
+      .reduce((best, candidate) => candidate.point.signal > best.point.signal ? candidate : best)
+      .index;
+    const edgeCount = Math.max(2, Math.floor(local.length * 0.12));
+    const leftBaseline = medianValue(local.slice(0, edgeCount).map((point) => point.signal));
+    const rightBaseline = medianValue(local.slice(-edgeCount).map((point) => point.signal));
+    if (!Number.isFinite(leftBaseline) || !Number.isFinite(rightBaseline)) return fallbackParameters();
+    const firstX = local[0].x;
+    const lastX = local[local.length - 1].x;
+    const baselineAt = (xValue) => {
+      const fraction = lastX === firstX ? 0 : (xValue - firstX) / (lastX - firstX);
+      return leftBaseline + (rightBaseline - leftBaseline) * fraction;
+    };
+    local.forEach((point) => {
+      point.baseline = baselineAt(point.x);
+      point.excess = point.signal - point.baseline;
+    });
+
+    const center = local[centerIndex];
+    const peakHeight = center.excess;
+    if (!Number.isFinite(peakHeight) || peakHeight <= 0) return fallbackParameters();
+    const leftShoulder = Math.min(...local.slice(0, centerIndex + 1).map((point) => point.signal));
+    const rightShoulder = Math.min(...local.slice(centerIndex).map((point) => point.signal));
+    const prominence = Math.max(0, center.signal - Math.max(leftShoulder, rightShoulder, center.baseline));
+    const halfLevel = peakHeight / 2;
+    let leftCrossing = null;
+    for (let index = centerIndex; index > 0; index -= 1) {
+      if (local[index - 1].excess <= halfLevel && local[index].excess >= halfLevel) {
+        const previous = local[index - 1];
+        const current = local[index];
+        const fraction = current.excess === previous.excess ? 0 : (halfLevel - previous.excess) / (current.excess - previous.excess);
+        leftCrossing = previous.x + (current.x - previous.x) * fraction;
+        break;
+      }
+    }
+    let rightCrossing = null;
+    for (let index = centerIndex; index < local.length - 1; index += 1) {
+      if (local[index].excess >= halfLevel && local[index + 1].excess <= halfLevel) {
+        const current = local[index];
+        const next = local[index + 1];
+        const fraction = next.excess === current.excess ? 0 : (halfLevel - current.excess) / (next.excess - current.excess);
+        rightCrossing = current.x + (next.x - current.x) * fraction;
+        break;
+      }
+    }
+    const width = Number.isFinite(leftCrossing) && Number.isFinite(rightCrossing)
+      ? Math.abs(rightCrossing - leftCrossing)
+      : null;
+    const shape = width === null ? 'unknown' : width <= 20 ? 'sharp' : width >= 80 ? 'broad' : 'band';
+    const fullRange = Math.max(...signalValues) - Math.min(...signalValues);
+    const flags = [];
+    if (center.x >= 2280 && center.x <= 2400) flags.push('possible_atmospheric_co2');
+    if (center.x < 500) flags.push('possible_low_frequency_artifact');
+    if (width === null) flags.push('width_unresolved');
+    return {
+      originalNu: center.x,
+      height: Number(peakHeight.toFixed(6)),
+      prominence: Number(prominence.toFixed(6)),
+      widthCm1: width === null ? null : Number(width.toFixed(2)),
+      fwhmCm1: width === null ? null : Number(width.toFixed(2)),
+      shape,
+      direction: 'absorption',
+      confidence: fullRange > 0 ? Number(Math.min(1, Math.max(0, prominence / fullRange)).toFixed(4)) : null,
+      intensity: fullRange > 0 ? Math.round(Math.min(100, Math.max(0, (peakHeight / fullRange) * 100))) : null,
+      qualityFlags: flags,
+    };
   }
 
   function estimatePeakShape(centerX, leftX, rightX) {
@@ -1817,6 +2208,9 @@ let localSaveTimer = null;
         widthCm1: Number.isFinite(Number(stripe.widthCm1)) ? Number(stripe.widthCm1) : null,
         fwhmCm1: Number.isFinite(Number(stripe.fwhmCm1)) ? Number(stripe.fwhmCm1) : null,
         shape: stripe.shape || null,
+        qualityFlags: Array.isArray(stripe.qualityFlags)
+          ? stripe.qualityFlags.filter((flag) => flag !== 'manual_estimate_fallback')
+          : [],
         direction: stripe.direction || 'absorption',
         detectionMethod: stripe.source === 'automatic' ? 'automatic' : 'manual',
         confidence: Number.isFinite(Number(stripe.confidence))
@@ -1832,6 +2226,7 @@ let localSaveTimer = null;
       id: spectrum.id,
       name: customNames.get(spectrumColumn(spectrum.id)) || spectrum.name,
       sourceFile: spectrum.sourceFile,
+      role: spectrum.role || spectrumRoles.get(spectrum.id) || 'unknown',
       signalType: spectrum.signalType || 'unknown',
       xUnit: spectrum.xUnit || 'cm-1',
       pointCount: spectrum.points.length,
@@ -1848,13 +2243,17 @@ let localSaveTimer = null;
         reactionMode: spectra.length > 1,
         toleranceCm1: 8,
         shiftThresholdCm1: 2,
+        prominenceChangeThreshold: 0.05,
+        widthChangeThreshold: 1,
+        userPrompt: analysisPromptInput?.value.trim().slice(0, 2000) || '',
       },
     };
   }
 
   function buildSessionSnapshot() {
     return {
-      version: 1,
+      version: 2,
+      settings: buildPersistentSettings(),
       files: lastFilesRaw,
       fileName: fileNameInput.value,
       sampleIndex: sampleInput ? sampleInput.value : '',
@@ -1864,22 +2263,153 @@ let localSaveTimer = null;
       visibleSeries: Object.fromEntries(visibleSeries),
       baselineSeries,
       baselineModel,
+      detectorAppliedSettings: Object.fromEntries(detectorAppliedSettings),
+      detectorProcessedBySpectrum: Object.fromEntries(detectorProcessedBySpectrum),
       xRange: { min: xMinInput.value, max: xMaxInput.value },
       yRange: { min: yMinInput.value, max: yMaxInput.value },
+      chartBounds: { ...chartNavigationBounds },
+      viewport: { ...chartViewport },
       customNames: Object.fromEntries(customNames),
+      analysisPrompt: analysisPromptInput?.value || '',
       analysis: analysisData,
       spectra: lastSpectra,
       markerSpectrumId,
       activeSpectrumId,
+      markerActive,
+      markerX,
+      stripeIdSeq,
+      peaksTableCollapsed,
     };
   }
 
+  function buildPersistentSettings() {
+    return {
+      version: 1,
+      language: currentLang,
+      fileName: fileNameInput?.value || '',
+      sampleIndex: sampleInput?.value || '',
+      detector: {
+        signalType: detectorSignalType?.value || 'unknown',
+        baselineMethod: detectorBaselineMethod?.value || 'arpls',
+        minProminence: detectorMinProminence?.value ?? '0.02',
+        minSeparation: detectorMinSeparation?.value ?? '8',
+        smoothingWindow: detectorSmoothingWindow?.value ?? '5',
+      },
+      chart: {
+        xRange: { min: xMinInput?.value ?? '', max: xMaxInput?.value ?? '' },
+        yRange: { min: yMinInput?.value ?? '', max: yMaxInput?.value ?? '' },
+        bounds: { ...chartNavigationBounds },
+        viewport: { ...chartViewport },
+        visibleSeries: Object.fromEntries(visibleSeries),
+      },
+      peaks: {
+        activeSet: activeStripeSet,
+        tableCollapsed: peaksTableCollapsed,
+        activeSpectrumId,
+        markerSpectrumId,
+        markerActive,
+        markerX,
+      },
+      baseline: {
+        series: baselineSeries,
+        degree: baselineDegreeInput?.value ?? '2',
+        model: baselineModel,
+      },
+      analysisPrompt: analysisPromptInput?.value || '',
+    };
+  }
+
+  function applyPeaksTableState(collapsed) {
+    peaksTableCollapsed = Boolean(collapsed);
+    if (!peaksTableWrap || !togglePeaksTableBtn) return;
+    peaksTableWrap.hidden = peaksTableCollapsed;
+    togglePeaksTableBtn.setAttribute('aria-expanded', String(!peaksTableCollapsed));
+    togglePeaksTableBtn.title = peaksTableCollapsed ? 'Expand peaks table' : 'Collapse peaks table';
+    togglePeaksTableBtn.setAttribute('aria-label', togglePeaksTableBtn.title);
+    const icon = togglePeaksTableBtn.querySelector('.material-symbols-outlined');
+    if (icon) icon.textContent = peaksTableCollapsed ? 'unfold_more' : 'unfold_less';
+  }
+
+  function applyPersistentSettings(settings = {}) {
+    if (!settings || typeof settings !== 'object') return;
+    if (supportedLangs.includes(settings.language)) currentLang = settings.language;
+    const setValue = (element, value) => {
+      if (element && value !== undefined && value !== null) element.value = String(value);
+    };
+    setValue(fileNameInput, settings.fileName);
+    setValue(sampleInput, settings.sampleIndex);
+    const detector = settings.detector || {};
+    setValue(detectorSignalType, detector.signalType);
+    setValue(detectorBaselineMethod, detector.baselineMethod);
+    setValue(detectorMinProminence, detector.minProminence);
+    setValue(detectorMinSeparation, detector.minSeparation);
+    setValue(detectorSmoothingWindow, detector.smoothingWindow);
+    const chart = settings.chart || {};
+    const xRange = chart.xRange || {};
+    const yRange = chart.yRange || {};
+    setValue(xMinInput, xRange.min);
+    setValue(xMaxInput, xRange.max);
+    setValue(yMinInput, yRange.min);
+    setValue(yMaxInput, yRange.max);
+    setNavigationBounds(chart.bounds || {
+      xMin: xRange.min,
+      xMax: xRange.max,
+      yMin: yRange.min,
+      yMax: yRange.max,
+    });
+    setChartViewport(chart.viewport || {
+      xMin: xRange.min,
+      xMax: xRange.max,
+      yMin: yRange.min,
+      yMax: yRange.max,
+    }, defaultYRange);
+    if (yMinInput.value === '' && yMaxInput.value === ''
+      && chartNavigationBounds.yMin === null && chartNavigationBounds.yMax === null) {
+      chartViewport.yMin = null;
+      chartViewport.yMax = null;
+    }
+    if (chart.visibleSeries && typeof chart.visibleSeries === 'object') {
+      visibleSeries = new Map(Object.entries(chart.visibleSeries));
+    }
+    const peaks = settings.peaks || {};
+    if (peaks.activeSet) activeStripeSet = peaks.activeSet;
+    if (peaks.activeSpectrumId) activeSpectrumId = peaks.activeSpectrumId;
+    if (peaks.markerSpectrumId) markerSpectrumId = peaks.markerSpectrumId;
+    if (peaks.markerActive !== undefined) markerActive = Boolean(peaks.markerActive);
+    if (peaks.markerX !== undefined && peaks.markerX !== null) markerX = Number(peaks.markerX);
+    applyPeaksTableState(peaks.tableCollapsed);
+    const baseline = settings.baseline || {};
+    setValue(baselineDegreeInput, baseline.degree);
+    if (baseline.series !== undefined) baselineSeries = baseline.series;
+    if (baseline.model) baselineModel = baseline.model;
+    if (settings.analysisPrompt !== undefined) setValue(analysisPromptInput, String(settings.analysisPrompt).slice(0, 2000));
+    applyTranslations();
+  }
+
+  function restoreLocalSettings() {
+    try {
+      const raw = localStorage.getItem(LOCAL_SETTINGS_KEY);
+      if (raw) applyPersistentSettings(JSON.parse(raw));
+    } catch (error) {
+      console.warn('[FTIR local settings] restore failed', { name: error.name, message: error.message });
+    }
+  }
+
   function saveLocalSession() {
+    saveLocalSettings();
     if (!lastFilesRaw.length) return;
     try {
       localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(buildSessionSnapshot()));
     } catch (error) {
       console.warn('[FTIR local session] save failed', { name: error.name, message: error.message });
+    }
+  }
+
+  function saveLocalSettings() {
+    try {
+      localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(buildPersistentSettings()));
+    } catch (error) {
+      console.warn('[FTIR local settings] save failed', { name: error.name, message: error.message });
     }
   }
 
@@ -1894,6 +2424,7 @@ let localSaveTimer = null;
   function clearLocalSession() {
     try {
       localStorage.removeItem(LOCAL_SESSION_KEY);
+      localStorage.removeItem(LOCAL_SETTINGS_KEY);
     } catch (error) {
       console.warn('[FTIR local session] clear failed', { name: error.name, message: error.message });
     }
@@ -1907,10 +2438,19 @@ let localSaveTimer = null;
       const raw = localStorage.getItem(LOCAL_SESSION_KEY);
       if (!raw) return;
       const session = JSON.parse(raw);
-      if (!session || session.version !== 1 || !Array.isArray(session.files) || !session.files.length) return;
+      if (!session || ![1, 2].includes(session.version) || !Array.isArray(session.files) || !session.files.length) return;
+      if (session.settings) applyPersistentSettings(session.settings);
       lastFilesRaw = session.files.map((file) => ({ name: file.name, content: file.content }));
+      spectrumRoles = new Map((session.spectra || [])
+        .filter((spectrum) => spectrum?.id)
+        .map((spectrum) => [String(spectrum.id), spectrum.role || 'unknown']));
       stripeSets = session.stripeSets || stripeSets;
       activeStripeSet = session.activeStripeSet || activeStripeSet;
+      stripeIdSeq = Number(session.stripeIdSeq) || 0;
+      markerActive = Boolean(session.markerActive ?? session.settings?.peaks?.markerActive);
+      markerX = session.markerX !== undefined && session.markerX !== null ? Number(session.markerX) : session.settings?.peaks?.markerX ?? null;
+      peaksTableCollapsed = Boolean(session.peaksTableCollapsed ?? session.settings?.peaks?.tableCollapsed);
+      applyPeaksTableState(peaksTableCollapsed);
       if (!stripeSets[activeStripeSet]) stripeSets[activeStripeSet] = [];
       processFiles(lastFilesRaw, {
         fileName: session.fileName,
@@ -1919,13 +2459,22 @@ let localSaveTimer = null;
         visibleSeries: session.visibleSeries,
         baselineSeries: session.baselineSeries,
         baselineModel: session.baselineModel,
+        detectorAppliedSettings: session.detectorAppliedSettings,
+        detectorProcessedBySpectrum: session.detectorProcessedBySpectrum,
         xRange: session.xRange,
         yRange: session.yRange,
+        chartBounds: session.chartBounds || session.settings?.chart?.bounds,
+        viewport: session.viewport || session.settings?.chart?.viewport,
         customNames: session.customNames,
         stripeSets,
         markerSpectrumId: session.markerSpectrumId,
         activeSpectrumId: session.activeSpectrumId,
       });
+      if (session.settings) {
+        applyPersistentSettings(session.settings);
+        updateDetectorControls();
+      }
+      if (analysisPromptInput) analysisPromptInput.value = String(session.analysisPrompt || '').slice(0, 2000);
       analysisData = session.analysis || null;
       if (analysisData && analysisCard && analysisResult) {
         analysisCard.hidden = false;
@@ -1953,14 +2502,14 @@ let localSaveTimer = null;
     };
     const candidates = Array.isArray(result.candidates) ? result.candidates : [];
     const candidateCards = candidates.map((candidate, index) => {
-      const label = candidate.group || candidate.assignment || candidate.label || 'Assignment not returned';
+      const label = candidate.group || candidate.assignment || candidate.label || t('analysisFunctionalGroupUnknown');
       const confidence = candidate.likelihood || candidate.confidence || 'unknown';
       const confidenceClass = String(confidence).toLowerCase().replace(/[^a-z]+/g, '-');
       const peak = Number.isFinite(Number(candidate.nu)) ? `<span class="analysis-peak">${escapeHtml(candidate.nu)} cm⁻¹</span>` : '';
       return `<article class="analysis-candidate">
         <div class="analysis-candidate-head"><span class="analysis-rank">${index + 1}</span><h4>${escapeHtml(label)}</h4><span class="analysis-confidence ${confidenceClass}">${escapeHtml(confidence)}</span></div>
         ${peak}
-        ${candidate.reasoning || candidate.explanation ? `<p>${escapeHtml(candidate.reasoning || candidate.explanation)}</p>` : `<p class="analysis-warning">No explanation returned for this candidate.</p>`}
+        ${candidate.reasoning || candidate.explanation ? `<p>${escapeHtml(candidate.reasoning || candidate.explanation)}</p>` : `<p class="analysis-warning">${escapeHtml(t('analysisNoExplanation'))}</p>`}
       </article>`;
     }).join('');
     const spectrumReports = Array.isArray(result.spectra) ? result.spectra : [];
@@ -1970,34 +2519,37 @@ let localSaveTimer = null;
       const spectrum = lastSpectra.find((item) => item.id === report.spectrumId);
       const spectrumName = customNames.get(spectrumColumn(report.spectrumId)) || spectrum?.name || report.spectrumId;
       return `<section class="analysis-spectrum"><div class="analysis-spectrum-head"><h4>${escapeHtml(spectrumName)}</h4><span>${escapeHtml(report.spectrumId)}</span></div><div class="analysis-candidates">${assignments.map((assignment) => {
-        const label = assignment.group || assignment.assignment || 'Functional group not assigned';
+        const label = assignment.group || assignment.assignment || t('analysisFunctionalGroupUnknown');
         const confidence = assignment.confidence || assignment.likelihood || 'unknown';
         const confidenceClass = String(confidence).toLowerCase().replace(/[^a-z]+/g, '-');
-        return `<article class="analysis-candidate"><div class="analysis-candidate-head"><span class="analysis-peak">${escapeHtml(assignment.nu)} cm⁻¹</span><h4>${escapeHtml(label)}</h4><span class="analysis-confidence ${confidenceClass}">${escapeHtml(confidence)}</span></div><small class="analysis-peak-id">${escapeHtml(assignment.peakId || '')}</small><p>${escapeHtml(assignment.reasoning || 'No reasoning returned.')}</p></article>`;
+        return `<article class="analysis-candidate"><div class="analysis-candidate-head"><span class="analysis-peak">${escapeHtml(assignment.nu)} cm⁻¹</span><h4>${escapeHtml(label)}</h4><span class="analysis-confidence ${confidenceClass}">${escapeHtml(confidence)}</span></div><small class="analysis-peak-id">${escapeHtml(assignment.peakId || '')}</small><p>${escapeHtml(assignment.reasoning || t('analysisNoExplanation'))}</p></article>`;
       }).join('')}</div></section>`;
     }).join('');
     const hasSpectrumAssignments = spectrumReports.some((report) => Array.isArray(report.peakAssignments) && report.peakAssignments.length);
+    const assignmentsSection = hasSpectrumAssignments
+      ? `<section class="analysis-section"><h4>${escapeHtml(t('analysisAssignments'))}</h4>${assignmentSections}</section>`
+      : '';
     const supporting = Array.isArray(result.supporting_peaks) && result.supporting_peaks.length
-      ? `<section class="analysis-section"><h4>Supporting peaks</h4><div class="analysis-tags">${result.supporting_peaks.map((peak) => {
+      ? `<section class="analysis-section"><h4>${escapeHtml(t('analysisSupportingPeaks'))}</h4><div class="analysis-tags">${result.supporting_peaks.map((peak) => {
         const value = typeof peak === 'object' ? peak.nu : peak;
         const label = typeof peak === 'object' ? (peak.assignment || peak.label || '') : '';
         return `<span class="analysis-tag"><strong>${escapeHtml(value)} cm⁻¹</strong>${label ? ` ${escapeHtml(label)}` : ''}</span>`;
       }).join('')}</div></section>`
       : '';
     const sections = [
-      result.missing_evidence?.length ? `<section class="analysis-section"><h4>Missing evidence</h4>${list(result.missing_evidence)}</section>` : '',
-      result.limitations?.length ? `<section class="analysis-section"><h4>Limitations</h4>${list(result.limitations)}</section>` : '',
+      result.missing_evidence?.length ? `<section class="analysis-section"><h4>${escapeHtml(t('analysisMissingEvidence'))}</h4>${list(result.missing_evidence)}</section>` : '',
+      result.limitations?.length ? `<section class="analysis-section"><h4>${escapeHtml(t('analysisLimitations'))}</h4>${list(result.limitations)}</section>` : '',
     ].join('');
     const reaction = result.reactionAssessment;
     const reactionStatus = {
-      passed: 'Reaction passed',
-      not_passed: 'Reaction not passed',
-      inconclusive: 'Inconclusive',
-    }[reaction?.status] || 'Reaction assessment';
+      passed: t('analysisReactionPassed'),
+      not_passed: t('analysisReactionNotPassed'),
+      inconclusive: t('analysisReactionInconclusive'),
+    }[reaction?.status] || t('analysisReactionAssessment');
     const reactionCard = reaction
       ? `<section class="analysis-reaction ${escapeHtml(reaction.status || 'inconclusive')}">
           <div class="analysis-reaction-head"><h4>${reactionStatus}</h4><span>${escapeHtml(reaction.confidence || 'unknown')}</span></div>
-          <p>${escapeHtml(reaction.summary || 'No reaction summary provided.')}</p>
+          <p>${escapeHtml(reaction.summary || t('analysisNoReactionSummary'))}</p>
           ${reaction.missingEvidence?.length ? list(reaction.missingEvidence) : ''}
         </section>`
       : '';
@@ -2028,31 +2580,35 @@ let localSaveTimer = null;
       ? objectiveChanges.map((change) => ({ ...change, explanation: summaryByGroup.get(`${change.type}:${change.groupId}`)?.explanation || summaryByGroup.get(`${change.type}:${change.groupId}`)?.reasoning || '' }))
       : Array.from(summaryByGroup.values());
     const changeLabels = {
-      disappeared_peak: 'Disappeared',
-      appeared_peak: 'Appeared',
-      shifted_peak: 'Shifted',
-      prominence_change: 'Prominence changed',
-      width_change: 'Width changed',
+      disappeared_peak: t('analysisDisappeared'),
+      appeared_peak: t('analysisAppeared'),
+      shifted_peak: t('analysisShifted'),
+      prominence_change: t('analysisProminenceChanged'),
+      width_change: t('analysisWidthChanged'),
     };
+    const renderChange = (change) => {
+      const details = change.type === 'shifted_peak'
+        ? `${formatNumber(change.fromNu)} → ${formatNumber(change.toNu)} cm⁻¹ (Δ ${formatNumber(change.deltaNu)})`
+        : change.type === 'prominence_change'
+          ? `${formatNumber(change.fromProminence, 3)} → ${formatNumber(change.toProminence, 3)} (Δ ${formatNumber(change.deltaProminence, 3)})`
+          : change.type === 'width_change'
+            ? `${formatNumber(change.fromFwhmCm1)} → ${formatNumber(change.toFwhmCm1)} cm⁻¹ (Δ ${formatNumber(change.deltaFwhm)})`
+            : `${formatNumber(change.nu)} cm⁻¹`;
+      return `<div class="analysis-change"><strong>${escapeHtml(displaySpectrum(change.fromSpectrumId))} → ${escapeHtml(displaySpectrum(change.toSpectrumId))}</strong><span>${escapeHtml(details)}</span>${change.explanation ? `<p>${escapeHtml(change.explanation)}</p>` : ''}</div>`;
+    };
+    const changeGroups = Object.entries(changeLabels)
+      .map(([type, label]) => ({ type, label, changes: changes.filter((change) => change.type === type) }))
+      .filter((group) => group.changes.length);
     const comparisonSection = changes.length
-      ? `<section class="analysis-section"><h4>Changes between spectra</h4><div class="analysis-changes">${changes.map((change) => {
-          const details = change.type === 'shifted_peak'
-            ? `${formatNumber(change.fromNu)} → ${formatNumber(change.toNu)} cm⁻¹ (Δ ${formatNumber(change.deltaNu)})`
-            : change.type === 'prominence_change'
-              ? `Δ prominence ${formatNumber(change.deltaProminence)}`
-              : change.type === 'width_change'
-                ? `Δ FWHM ${formatNumber(change.deltaFwhm)} cm⁻¹`
-                : `${formatNumber(change.nu)} cm⁻¹`;
-          return `<div class="analysis-change"><strong>${escapeHtml(changeLabels[change.type] || change.type)}</strong><span>${escapeHtml(displaySpectrum(change.fromSpectrumId))} → ${escapeHtml(displaySpectrum(change.toSpectrumId))}</span><em>${escapeHtml(details)}</em>${change.explanation ? `<p>${escapeHtml(change.explanation)}</p>` : ''}</div>`;
-        }).join('')}</div></section>`
+      ? `<section class="analysis-section"><h4>${escapeHtml(t('analysisChanges'))}</h4><div class="analysis-change-groups">${changeGroups.map((group) => `<section class="analysis-change-group"><div class="analysis-change-group-head"><strong>${escapeHtml(group.label)}</strong><span>${group.changes.length}</span></div><div class="analysis-changes">${group.changes.map(renderChange).join('')}</div></section>`).join('')}</div></section>`
       : '';
     return `<div class="analysis-report">
       ${reactionCard}
-      <section class="analysis-summary"><h4>Interpretation</h4><p>${escapeHtml(result.interpretation || 'No summary provided.')}</p></section>
-      ${assignmentSections || (!hasSpectrumAssignments && candidateCards ? `<section class="analysis-section"><h4>Confirmed peak assignments by spectrum</h4><div class="analysis-candidates">${candidateCards}</div></section>` : '')}
+      <section class="analysis-summary"><h4>${escapeHtml(t('analysisInterpretation'))}</h4><p>${escapeHtml(result.interpretation || t('analysisNoSummary'))}</p></section>
+      ${assignmentsSection || (!hasSpectrumAssignments && candidateCards ? `<section class="analysis-section"><h4>${escapeHtml(t('analysisAssignments'))}</h4><div class="analysis-candidates">${candidateCards}</div></section>` : '')}
       ${comparisonSection}
       ${supporting}${sections}
-      <div class="analysis-footer"><span>Confidence: <strong>${escapeHtml(result.confidence || 'unknown')}</strong></span>${result.model ? `<span>Model: ${escapeHtml(result.model)}</span>` : ''}</div>
+      <div class="analysis-footer"><span>${escapeHtml(t('analysisConfidence'))}: <strong>${escapeHtml(result.confidence || 'unknown')}</strong></span>${result.model ? `<span>${escapeHtml(t('analysisModel'))}: ${escapeHtml(result.model)}</span>` : ''}</div>
     </div>`;
   }
 
@@ -2178,10 +2734,15 @@ let localSaveTimer = null;
     baselineMap = model.map ? new Map(model.map) : new Map();
     baselinePreviewModel = null;
     defaultYRange = computeAdjustedExtent(lastData) || defaultYRange;
+    chartNavigationBounds.yMin = null;
+    chartNavigationBounds.yMax = null;
+    chartViewport.yMin = null;
+    chartViewport.yMax = null;
     yMinInput.value = '';
     yMaxInput.value = '';
     updateBaselineSelectOptions();
     renderChartFromData(lastData);
+    scheduleLocalSave();
   }
 
   function clearBaseline() {
@@ -2191,10 +2752,15 @@ let localSaveTimer = null;
     baselineMap = new Map();
     baselinePreviewModel = null;
     defaultYRange = computeAdjustedExtent(lastData) || defaultYRange;
+    chartNavigationBounds.yMin = null;
+    chartNavigationBounds.yMax = null;
+    chartViewport.yMin = null;
+    chartViewport.yMax = null;
     yMinInput.value = '';
     yMaxInput.value = '';
     updateBaselineSelectOptions();
     renderChartFromData(lastData);
+    scheduleLocalSave();
   }
 
   function setActiveStripeSet(setId) {
@@ -2208,11 +2774,12 @@ let localSaveTimer = null;
     });
     renderChartFromData(lastData);
     renderStripesTable();
+    scheduleLocalSave();
   }
 
   function renderStripesTable() {
     if (!peaksBody || !peaksEmpty) return;
-    if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = !lastData || !(stripeSets.candidates || []).length;
+    if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = !lastData || !activeSpectrumCandidates().length;
     peaksBody.innerHTML = '';
     const stripes = currentStripes();
     if (!stripes.length) {
@@ -2236,6 +2803,7 @@ let localSaveTimer = null;
         const num = Number(val.value);
         if (!Number.isFinite(num)) return;
         stripe.x = num;
+        if (stripe.source === 'manual') Object.assign(stripe, estimateManualPeakParameters(num, stripe.spectrumId));
         renderChartFromData(lastData, { skipLegend: true });
         renderStripesTable();
         scheduleLocalSave();
@@ -2271,13 +2839,24 @@ let localSaveTimer = null;
         meta.textContent = `Width: ${widthText} | FWHM: ${fwhmText} | Prominence: ${prominenceText} | Confidence: ${intensityText}% | Shape: ${stripe.shape || '—'}`;
         tipCell.appendChild(meta);
       }
+      if (Array.isArray(stripe.qualityFlags) && stripe.qualityFlags.length) {
+        const qualityLabels = {
+          possible_atmospheric_co2: t('qualityPossibleCo2'),
+          possible_low_frequency_artifact: t('qualityLowFrequency'),
+          width_unresolved: t('qualityWidthUnresolved'),
+        };
+        const quality = document.createElement('div');
+        quality.className = 'peaks-quality-warning';
+        quality.textContent = `${t('peakQualityFlags')}: ${stripe.qualityFlags.map((flag) => qualityLabels[flag] || flag).join(', ')}`;
+        tipCell.appendChild(quality);
+      }
       const moveWrap = document.createElement('div');
       moveWrap.className = 'peaks-move';
       const measureBtn = document.createElement('button');
       measureBtn.type = 'button';
       measureBtn.className = 'peaks-move-btn';
-      measureBtn.textContent = 'Measure';
-      measureBtn.title = 'Measure center, width and relative intensity on the chart';
+      measureBtn.textContent = t('peakMeasureBoundaries');
+      measureBtn.title = t('peakMeasureBoundariesHint');
       measureBtn.addEventListener('click', (event) => {
         event.stopPropagation();
         startStripeMeasurement(activeStripeSet, stripe.id);
@@ -2326,7 +2905,7 @@ let localSaveTimer = null;
     if (detectPeaksBtn) detectPeaksBtn.disabled = !enabled || !lastSpectra.length;
     if (openPeakSettingsBtn) openPeakSettingsBtn.disabled = !enabled || !lastSpectra.length;
     if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = !enabled || !lastPeakProcessing || lastPeakProcessing.spectrumId !== activeSpectrumId;
-    if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = !enabled || !(stripeSets.candidates || []).length;
+    if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = !enabled || !activeSpectrumCandidates().length;
     xMinInput.disabled = !enabled;
     xMaxInput.disabled = !enabled;
     yMinInput.disabled = !enabled;
@@ -2339,15 +2918,8 @@ let localSaveTimer = null;
     chartRow.classList.toggle('is-hidden', !enabled);
     chartControls?.classList.toggle('active', enabled);
     if (openChartSettingsBtn) openChartSettingsBtn.disabled = !enabled;
-    if (enabled) {
-      xMaxInput.value = String(defaultXRange.max);
-      xMinInput.value = String(defaultXRange.min);
-      yMinInput.value = '';
-      yMaxInput.value = '';
-      yMinInput.placeholder = t('yAuto') || 'auto';
-      yMaxInput.placeholder = t('yAuto') || 'auto';
-      visibleSeries = new Map();
-    }
+    yMinInput.placeholder = t('yAuto') || 'auto';
+    yMaxInput.placeholder = t('yAuto') || 'auto';
     updateDetectorControls();
   }
 
@@ -2369,6 +2941,10 @@ let localSaveTimer = null;
     if (name) customNames.set(column, name);
     else customNames.delete(column);
     offsets.set(column, Number(spectrumSettingsOffset?.value) || 0);
+    const spectrum = lastSpectra.find((item) => item.id === spectrumId);
+    const role = spectrumSettingsRole?.value || 'unknown';
+    spectrumRoles.set(spectrumId, role);
+    if (spectrum) spectrum.role = role;
     closeSpectrumSettings();
     updateSpectrumSelector();
     updateBaselineSelectOptions();
@@ -2382,10 +2958,18 @@ let localSaveTimer = null;
     chartSettingsDialog.showModal();
   });
   closeChartSettingsBtn?.addEventListener('click', () => {
+    updateNavigationBoundsFromInputs();
+    applyRangeChanges();
+    scheduleLocalSave();
     if (chartSettingsDialog?.open) chartSettingsDialog.close();
   });
   chartSettingsDialog?.addEventListener('click', (event) => {
-    if (event.target === chartSettingsDialog) chartSettingsDialog.close();
+    if (event.target === chartSettingsDialog) {
+      updateNavigationBoundsFromInputs();
+      applyRangeChanges();
+      scheduleLocalSave();
+      chartSettingsDialog.close();
+    }
   });
 
   closeSpectrumSettingsBtn?.addEventListener('click', closeSpectrumSettings);
@@ -2497,6 +3081,7 @@ let localSaveTimer = null;
     if (!lastData || !activeSpectrumId) return;
     const applied = detectorAppliedSettings.get(activeSpectrumId);
     if (detectorBaselineMethod && applied?.baselineMethod) detectorBaselineMethod.value = applied.baselineMethod;
+    if (detectorSignalType && applied?.signalType) detectorSignalType.value = applied.signalType;
     peakDetectorSettingsDialog?.showModal();
     previewPeakBaseline();
   });
@@ -2512,41 +3097,44 @@ let localSaveTimer = null;
   detectorBaselineMethod?.addEventListener('change', () => {
     updateDetectorControls();
     previewPeakBaseline();
+    scheduleLocalSave();
   });
   detectorSignalType?.addEventListener('change', () => {
     updateDetectorControls();
     if (peakDetectorSettingsDialog?.open) previewPeakBaseline();
+    scheduleLocalSave();
+  });
+  [detectorMinProminence, detectorMinSeparation, detectorSmoothingWindow, baselineDegreeInput].forEach((input) => {
+    input?.addEventListener('input', scheduleLocalSave);
+    input?.addEventListener('change', scheduleLocalSave);
   });
 
   confirmAllPeaksBtn?.addEventListener('click', () => {
-    const candidates = Array.isArray(stripeSets.candidates) ? stripeSets.candidates : [];
+    const candidates = activeSpectrumCandidates();
     if (!candidates.length) {
-      setStatus('No candidate peaks to confirm.', true);
+      setStatus('No candidate peaks for the selected spectrum.', true);
       return;
     }
     const confirmed = Array.isArray(stripeSets.confirmed) ? stripeSets.confirmed : [];
     const confirmedIds = new Set(confirmed.map((stripe) => stripe.peakId || stripe.id));
     const newConfirmed = candidates.filter((stripe) => !confirmedIds.has(stripe.peakId || stripe.id));
     stripeSets.confirmed = [...confirmed, ...newConfirmed];
-    stripeSets.candidates = [];
+    const candidateIds = new Set(candidates.map((stripe) => stripe.id));
+    stripeSets.candidates = (stripeSets.candidates || []).filter((stripe) => !candidateIds.has(stripe.id));
     activeStripeSet = 'confirmed';
     stripeSetBtns.forEach((btn) => btn.classList.toggle('active', btn.dataset.set === 'confirmed'));
     if (confirmAllPeaksBtn) confirmAllPeaksBtn.disabled = true;
     renderChartFromData(lastData);
     renderStripesTable();
     scheduleLocalSave();
-    setStatus(`Confirmed ${newConfirmed.length} peaks across ${lastSpectra.length} spectra.`);
+    const spectrum = lastSpectra.find((item) => item.id === activeSpectrumId);
+    setStatus(`Confirmed ${newConfirmed.length} peaks for ${spectrum?.name || activeSpectrumId}.`);
   });
 
   togglePeaksTableBtn?.addEventListener('click', () => {
     if (!peaksTableWrap) return;
-    const collapsed = !peaksTableWrap.hidden;
-    peaksTableWrap.hidden = collapsed;
-    togglePeaksTableBtn.setAttribute('aria-expanded', String(!collapsed));
-    togglePeaksTableBtn.title = collapsed ? 'Expand peaks table' : 'Collapse peaks table';
-    togglePeaksTableBtn.setAttribute('aria-label', togglePeaksTableBtn.title);
-    const icon = togglePeaksTableBtn.querySelector('.material-symbols-outlined');
-    if (icon) icon.textContent = collapsed ? 'unfold_more' : 'unfold_less';
+    applyPeaksTableState(!peaksTableCollapsed);
+    scheduleLocalSave();
   });
 
   const getBaselineParams = () => {
@@ -2565,15 +3153,16 @@ let localSaveTimer = null;
 
   baselineRevertBtn?.addEventListener('click', () => {});
 
-  baselineSeriesSelect?.addEventListener('change', () => {});
+  baselineSeriesSelect?.addEventListener('change', scheduleLocalSave);
 
   addStripeBtn?.addEventListener('click', () => {
     const xVal =
       markerActive && markerX !== null
         ? markerX
         : (() => {
-            const cx = Number(xMaxInput.value) || defaultXRange.max;
-            const cn = Number(xMinInput.value) || defaultXRange.min;
+            const viewport = getChartViewport(computeAdjustedExtent(lastData) || [0, 1]);
+            const cx = viewport.xMax;
+            const cn = viewport.xMin;
             return (cx + cn) / 2;
           })();
     const current = currentStripes();
@@ -2586,16 +3175,20 @@ let localSaveTimer = null;
     const tipText = matches
       .map((m) => [m.group, m.class, m.details].filter(Boolean).join(' — '))
       .join('; ');
+    const nearestPoint = findNearestSpectrumPoint(xVal, spectrumId);
+    const calculated = estimateManualPeakParameters(nearestPoint?.x ?? xVal, spectrumId);
+    const peakX = calculated.originalNu ?? nearestPoint?.x ?? xVal;
     stripeSets[activeStripeSet] = [...current, {
       id: `stripe-${stripeIdSeq}`,
       peakId,
       spectrumId,
-      x: xVal,
+      x: peakX,
       color,
       label,
       tip: tipText,
       labelSource: label ? 'peak-db' : 'empty',
       source: 'manual',
+      ...calculated,
     }];
     renderChartFromData(lastData);
     renderStripesTable();
@@ -2709,24 +3302,7 @@ let localSaveTimer = null;
       setStatus('Nothing to export', true);
       return;
     }
-    const session = {
-      files: lastFilesRaw,
-      fileName: fileNameInput.value,
-      sampleIndex: sampleInput ? sampleInput.value : '',
-      offsets: Object.fromEntries(offsets),
-      stripeSets,
-      activeStripeSet,
-      visibleSeries: Object.fromEntries(visibleSeries),
-      baselineSeries,
-      baselineModel,
-      xRange: { min: xMinInput.value, max: xMaxInput.value },
-      yRange: { min: yMinInput.value, max: yMaxInput.value },
-      customNames: Object.fromEntries(customNames),
-      analysis: analysisData,
-      spectra: lastSpectra,
-      markerSpectrumId,
-      activeSpectrumId,
-    };
+    const session = buildSessionSnapshot();
     const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2746,12 +3322,21 @@ let localSaveTimer = null;
       const text = await f.text();
       const session = JSON.parse(text);
       if (!Array.isArray(session.files)) throw new Error('Invalid session');
+      if (session.settings) applyPersistentSettings(session.settings);
       if (sampleInput) sampleInput.value = session.sampleIndex || '';
       fileNameInput.value = session.fileName || 'merged.csv';
       lastFilesRaw = session.files.map((x) => ({ name: x.name, content: x.content }));
+      spectrumRoles = new Map((session.spectra || [])
+        .filter((spectrum) => spectrum?.id)
+        .map((spectrum) => [String(spectrum.id), spectrum.role || 'unknown']));
       stripeSets = session.stripeSets || stripeSets;
       analysisData = session.analysis || null;
+      if (analysisPromptInput) analysisPromptInput.value = String(session.analysisPrompt || '').slice(0, 2000);
       activeStripeSet = session.activeStripeSet || activeStripeSet;
+      stripeIdSeq = Number(session.stripeIdSeq) || stripeIdSeq;
+      markerActive = Boolean(session.markerActive ?? session.settings?.peaks?.markerActive ?? markerActive);
+      markerX = session.markerX !== undefined && session.markerX !== null ? Number(session.markerX) : session.settings?.peaks?.markerX ?? markerX;
+      applyPeaksTableState(session.peaksTableCollapsed ?? session.settings?.peaks?.tableCollapsed ?? peaksTableCollapsed);
       if (!stripeSets[activeStripeSet]) stripeSets[activeStripeSet] = [];
       processFiles(lastFilesRaw, {
         fileName: session.fileName,
@@ -2760,16 +3345,25 @@ let localSaveTimer = null;
         visibleSeries: session.visibleSeries,
         baselineSeries: session.baselineSeries,
         baselineModel: session.baselineModel,
+        detectorAppliedSettings: session.detectorAppliedSettings,
+        detectorProcessedBySpectrum: session.detectorProcessedBySpectrum,
         xRange: session.xRange,
         yRange: session.yRange,
         customNames: session.customNames,
         stripeSets: stripeSets,
+        markerSpectrumId: session.markerSpectrumId,
+        activeSpectrumId: session.activeSpectrumId,
       });
+      if (session.settings) {
+        applyPersistentSettings(session.settings);
+        updateDetectorControls();
+      }
       if (analysisData && analysisCard && analysisResult) {
         analysisCard.hidden = false;
         analysisStatus.textContent = 'Restored';
         analysisResult.innerHTML = renderAnalysisReport(analysisData);
       }
+      scheduleLocalSave();
     } catch (err) {
       console.error(err);
       setStatus('Failed to import session', true);
@@ -2778,6 +3372,18 @@ let localSaveTimer = null;
     }
   });
   resetZoomBtn.addEventListener('click', () => {
+    setNavigationBounds({
+      xMin: defaultXRange.min,
+      xMax: defaultXRange.max,
+      yMin: null,
+      yMax: null,
+    });
+    setChartViewport({
+      xMin: defaultXRange.min,
+      xMax: defaultXRange.max,
+      yMin: null,
+      yMax: null,
+    });
     setRangeInputs({
       xMax: defaultXRange.max,
       xMin: defaultXRange.min,
@@ -2785,16 +3391,28 @@ let localSaveTimer = null;
       yMax: null,
     });
     renderChartFromData(lastData);
+    scheduleLocalSave();
   });
   const applyRangeChanges = () => {
     if (!lastData) return;
     renderChartFromData(lastData);
   };
   [xMinInput, xMaxInput, yMinInput, yMaxInput].forEach((el) => {
+    el.addEventListener('input', () => {
+      updateNavigationBoundsFromInputs();
+      scheduleLocalSave();
+    });
+    el.addEventListener('change', () => {
+      updateNavigationBoundsFromInputs();
+      applyRangeChanges();
+      scheduleLocalSave();
+    });
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
+        updateNavigationBoundsFromInputs();
         applyRangeChanges();
+        scheduleLocalSave();
       }
     });
   });
@@ -2871,6 +3489,8 @@ let localSaveTimer = null;
       baselineModel,
       xRange: { min: xMinInput.value, max: xMaxInput.value },
       yRange: { min: yMinInput.value, max: yMaxInput.value },
+      chartBounds: { ...chartNavigationBounds },
+      viewport: { ...chartViewport },
       customNames: Object.fromEntries(customNames),
       markerSpectrumId,
       activeSpectrumId,
@@ -2895,7 +3515,20 @@ let localSaveTimer = null;
     lastColumns = [];
     lastParsedRows = [];
     lastData = null;
+    chartNavigationBounds = {
+      xMin: defaultXRange.min,
+      xMax: defaultXRange.max,
+      yMin: null,
+      yMax: null,
+    };
+    chartViewport = {
+      xMin: defaultXRange.min,
+      xMax: defaultXRange.max,
+      yMin: null,
+      yMax: null,
+    };
     lastSpectra = [];
+    spectrumRoles = new Map();
     lastFilesRaw = [];
     lastPeakProcessing = null;
     if (openPeakProcessingBtn) openPeakProcessingBtn.disabled = true;
@@ -2913,6 +3546,8 @@ let localSaveTimer = null;
     detectorAppliedSettings = new Map();
     analysisData = null;
     activeStripeSet = 'candidates';
+    peaksTableCollapsed = false;
+    applyPeaksTableState(false);
     stripeIdSeq = 0;
     fileInput.value = ''; // allow re-importing the same file
     if (mergeBtn) mergeBtn.disabled = false;
@@ -2980,6 +3615,7 @@ let localSaveTimer = null;
     renderStripesTable();
     scheduleLocalSave();
   }
+  restoreLocalSettings();
   restoreLocalSession();
 })();
   // pan mode button removed
