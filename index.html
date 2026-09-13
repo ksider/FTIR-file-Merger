@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FTIR Merger</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+  <link rel="stylesheet" href="styles.css">
+  <script src="./d3.min.js"></script>
+  <script src="./jcampconverter.min.js"></script>
+</head>
+<body>
+  <nav class="tool-nav" aria-label="Multitool">
+    <a href="/">Multitool</a><a href="/search/">Search</a><a href="/qr/">QR</a><a href="/pdf/">PDF</a><a href="/badge/">Badge</a><a href="/ftir/" aria-current="page">FTIR</a>
+  </nav>
+  <div class="bg-accent"></div>
+  <div class="app-shell">
+    <header class="topbar surface">
+      <div class="brand">
+        <img src="logo.png" alt="FTIR Merger logo" class="brand-logo" />
+        <div class="brand-copy">
+          <p class="eyebrow">Spectra workspace</p>
+          <strong>FTIR viewer</strong>
+        </div>
+      </div>
+      <div class="topbar-form toolbar">
+        <input id="files" type="file" accept=".txt,.jdx,.dx,.jsm,.jcm,.csv,text/plain,application/octet-stream" multiple style="display:none;">
+        <input id="importSessionInput" type="file" accept=".json" style="display:none;">
+        <div class="toolbar-group">
+          <button id="selectFiles" class="icon-btn primary" type="button" title="Add files" aria-label="Add files">
+            <span class="material-symbols-outlined">computer_arrow_up</span>
+          </button>
+          <button id="exportSession" class="icon-btn" type="button" title="Export session" aria-label="Export session">
+            <span class="material-symbols-outlined">file_download</span>
+          </button>
+          <button id="importSession" class="icon-btn" type="button" title="Import session" aria-label="Import session">
+            <span class="material-symbols-outlined">unarchive</span>
+          </button>
+          <button id="clearLocalSession" class="icon-btn" type="button" title="Clear local session" aria-label="Clear local session">
+            <span class="material-symbols-outlined">delete_sweep</span>
+          </button>
+          <button id="copyPng" class="icon-btn saveimg" type="button" title="Copy chart PNG" aria-label="Copy chart PNG">
+            <span class="material-symbols-outlined">image</span>
+          </button>
+          <button id="copySvg" class="icon-btn saveimg" type="button" title="Copy chart SVG" aria-label="Copy chart SVG">
+            <span class="material-symbols-outlined">lasso_select</span>
+          </button>
+          <button id="saveCsv" class="icon-btn success" type="button" title="Save CSV" aria-label="Save CSV">
+            <span class="material-symbols-outlined">save</span>
+          </button>
+        </div>
+        <div class="toolbar-group name-group">
+          <label class="visually-hidden" for="fileName">CSV name</label>
+          <input id="fileName" type="text" class="save-name" value="merged.csv" aria-label="CSV file name">
+        </div>
+      </div>
+      <div class="lang-switch">
+        <a href="#" class="lang-link" data-lang="en">EN</a>
+        <a href="#" class="lang-link" data-lang="ru">RU</a>
+        <a href="#" class="lang-link" data-lang="sr">SR</a>
+      </div>
+    </header>
+
+    <div class="card surface">
+      <div class="inline-row inline-row--sub">
+        <p class="helper">Multi-select supported. Each column will match the file name.</p>
+        <div class="status-block">
+          <div id="status"></div>
+          <div id="downloadLink"></div>
+        </div>
+      </div>
+
+      <div class="chart-row is-hidden" id="chartRow">
+        <div>
+          <div id="zoneHint" class="zone-hint"></div>
+          <div id="chart"></div>
+        </div>
+        <div class="legend-wrap">
+          <div id="chartLegend" class="legend"></div>
+          <div id="chartControls" class="controls">
+            <h3 data-i18n="chartSettings">Chart settings</h3>
+            <div class="control-group">
+              <label data-i18n="xRange">X range (reverse):</label>
+              <div class="inline-inputs">
+                <input id="xMax" type="number" value="4000" step="1" disabled>
+                <span>→</span>
+                <input id="xMin" type="number" value="500" step="1" disabled>
+              </div>
+            </div>
+            <div class="control-group">
+              <label data-i18n="yRange">Y range:</label>
+              <div class="inline-inputs">
+                <input id="yMin" type="number" step="0.1" placeholder="auto" disabled>
+                <span>→</span>
+                <input id="yMax" type="number" step="0.1" placeholder="auto" disabled>
+              </div>
+            </div>
+            <div class="control-group baseline-group">
+              <label data-i18n="baselineSection">Baseline fit</label>
+              <div class="baseline-controls">
+                <select id="baselineSeries"></select>
+                <input id="baselineDegree" type="number" min="1" max="6" step="1" value="2">
+                <button id="baselinePreview" type="button" class="btn tonal" disabled data-i18n="baselinePreview">Preview</button>
+                <button id="baselineApply" type="button" class="btn tonal" disabled data-i18n="baselineApply">Apply</button>
+                <button id="baselineRevert" type="button" class="btn tonal" disabled data-i18n="baselineRevert">Revert</button>
+              </div>
+            </div>
+            <div class="control-actions">
+              <button id="refreshChart" type="button" class="icon-btn" disabled title="Refresh chart" aria-label="Refresh chart">
+                <span class="material-symbols-outlined">refresh</span>
+              </button>
+              <button id="resetZoom" type="button" class="icon-btn" disabled title="Reset zoom" aria-label="Reset zoom">
+                <span class="material-symbols-outlined">zoom_out_map</span>
+              </button>
+              <div class="save-wrap">
+                <input id="fileName" type="text" class="save-name" value="merged.csv" aria-label="CSV file name">
+                <button id="saveCsv" type="button" class="btn success" disabled data-i18n="saveCsv">Save CSV</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card surface peaks-card">
+      <div class="peaks-header">
+        <h3 data-i18n="peaksTitle">Peaks / stripes</h3>
+        <div class="peaks-actions">
+          <button id="addStripe" type="button" class="btn tonal" data-i18n="addStripe">Add stripe</button>
+          <button id="copyStripes" type="button" class="btn tonal" data-i18n="copyStripes">Copy table</button>
+          <button id="copyConfirmedPayload" type="button" class="btn tonal">Copy confirmed JSON</button>
+          <button id="analyzeConfirmed" type="button" class="btn primary">Analyze confirmed</button>
+          <p class="peaks-hint" data-i18n="peakHint">Click the chart to place a marker, then add it here.</p>
+        </div>
+      </div>
+      <div class="peaks-table">
+        <div class="stripe-sets">
+          <button class="stripe-set-btn active" data-set="candidates">Candidates</button>
+          <button class="stripe-set-btn" data-set="confirmed">Confirmed</button>
+        </div>
+        <div class="peaks-row peaks-head">
+          <span> </span>
+          <span data-i18n="colWave">Wavenumber</span>
+          <span data-i18n="colLabel">Label</span>
+          <span data-i18n="colTip">Tip</span>
+          <span> </span>
+        </div>
+        <div id="peaksEmpty" class="peaks-empty" data-i18n="peaksEmpty">No stripes yet. Set a marker and add it here.</div>
+        <div id="peaksBody" class="peaks-body"></div>
+      </div>
+    </div>
+    <div class="card surface analysis-card" id="analysisCard" hidden>
+      <div class="peaks-header">
+        <h3>LLM interpretation</h3>
+        <span id="analysisStatus" class="analysis-status"></span>
+      </div>
+      <div id="analysisResult" class="analysis-result" aria-live="polite"></div>
+    </div>
+    <footer class="footer surface">
+      <div class="footer-links">
+        <a id="footerSite" href="#" rel="noopener" target="_blank">nikolaysemenov.ru</a>
+        <span class="dot">•</span>
+        <a id="footerGithub" href="#" rel="noopener" target="_blank">GitHub</a>
+        <span class="dot">•</span>
+        <a id="footerCoffee" href="#" rel="noopener" target="_blank">Сoindrop</a>
+      </div>
+    </footer>
+  </div>
+
+  <script src="./config.js"></script>
+  <script src="./peak-db.js"></script>
+  <script src="./app.js"></script>
+
+  <!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-X25WXQ0818"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-X25WXQ0818');
+</script>
+</body>
+</html>
