@@ -6,6 +6,12 @@
   const chartSettings = config.chart || {};
   const analysisApi = config.analysisApi || '/api/analyze';
   const peakDetectionApi = config.peakDetectionApi || analysisApi.replace(/\/api\/analyze$/, '/api/peaks/detect');
+  const DEBUG_LOGGING = config.debugLogging !== false;
+  const clientLog = (event, details = {}) => {
+    if (DEBUG_LOGGING) console.info(`[FTIR] ${event}`, details);
+  };
+  const clientWarn = (event, details = {}) => console.warn(`[FTIR] ${event}`, details);
+  const clientError = (event, details = {}) => console.error(`[FTIR] ${event}`, details);
   const defaultXRange = chartSettings.defaultXRange || { min: 500, max: 4000 };
   const zones = chartSettings.zones || [];
 
@@ -161,7 +167,15 @@ let analysisData = null;
 const LOCAL_SESSION_KEY = 'ftir_merger_local_session_v1';
 const LOCAL_SETTINGS_KEY = 'ftir_merger_settings_v1';
 let localSaveTimer = null;
-let peaksTableCollapsed = false;
+  let peaksTableCollapsed = false;
+
+  clientLog('app.ready', {
+    pageOrigin: window.location.origin,
+    analysisApi,
+    peakDetectionApi,
+    language: currentLang,
+    debugLogging: DEBUG_LOGGING,
+  });
 
   const sanitizeName = (name) => (name || '').replace(/[^a-zA-Z0-9_-]+/g, '_') || 'col';
   const makeUniqueColumnName = (existing, raw) => {
@@ -250,6 +264,7 @@ let peaksTableCollapsed = false;
     const tab = event.target.closest('.spectrum-tab');
     if (!tab || !chartLegend.contains(tab)) return;
     const spectrumId = tab.dataset.spectrumId;
+    clientLog('spectrum.tab.click', { spectrumId, activeSpectrumId });
     if (spectrumId) setActiveSpectrum(spectrumId);
   });
 
@@ -1458,6 +1473,10 @@ let peaksTableCollapsed = false;
   }
 
   function processFiles(payloadFiles, opts = {}) {
+    clientLog('files.process.start', {
+      files: payloadFiles.map((file) => ({ name: file.name, bytes: file.content?.length || 0 })),
+      restoringSession: Boolean(opts.detectorProcessedBySpectrum || opts.stripeSets),
+    });
     const downloadName = opts.fileName || fileNameInput.value.trim() || 'merged.csv';
     const columns = [];
     const table = new Map();
@@ -1578,6 +1597,15 @@ let peaksTableCollapsed = false;
     markerSpectrumId = opts.markerSpectrumId !== undefined ? opts.markerSpectrumId : defaultSpectrumId;
     activeSpectrumId = opts.activeSpectrumId || markerSpectrumId || defaultSpectrumId;
     lastPeakProcessing = detectorProcessedBySpectrum.get(activeSpectrumId) || null;
+    clientLog('files.process.complete', {
+      spectra: lastSpectra.map((spectrum) => ({ id: spectrum.id, name: spectrum.name, points: spectrum.points.length })),
+      columns: cols,
+      rows: parsed.length,
+      dataPoints: series.length,
+      activeSpectrumId,
+      restoredProcessedSpectra: detectorProcessedBySpectrum.size,
+      failedFiles,
+    });
     const activeDetectorSettings = detectorAppliedSettings.get(activeSpectrumId);
     if (activeDetectorSettings) {
       if (detectorBaselineMethod && activeDetectorSettings.baselineMethod) detectorBaselineMethod.value = activeDetectorSettings.baselineMethod;
@@ -1684,9 +1712,17 @@ let peaksTableCollapsed = false;
 
   function setActiveSpectrum(spectrumId) {
     if (!spectrumId || !lastSpectra.some((spectrum) => spectrum.id === spectrumId)) return;
+    const previousSpectrumId = activeSpectrumId;
     activeSpectrumId = spectrumId;
     markerSpectrumId = spectrumId;
     lastPeakProcessing = detectorProcessedBySpectrum.get(spectrumId) || null;
+    clientLog('spectrum.active.changed', {
+      from: previousSpectrumId,
+      to: spectrumId,
+      hasProcessedBaseline: Boolean(lastPeakProcessing),
+      candidatePeaks: (stripeSets.candidates || []).filter((stripe) => stripe.spectrumId === spectrumId).length,
+      confirmedPeaks: (stripeSets.confirmed || []).filter((stripe) => stripe.spectrumId === spectrumId).length,
+    });
     if (detectorBaselineMethod && detectorAppliedSettings.has(spectrumId)) {
       detectorBaselineMethod.value = detectorAppliedSettings.get(spectrumId).baselineMethod || detectorBaselineMethod.value;
       if (detectorSignalType) detectorSignalType.value = detectorAppliedSettings.get(spectrumId).signalType || detectorSignalType.value;
@@ -1776,12 +1812,50 @@ let peaksTableCollapsed = false;
   async function requestPeakProcessing(options = {}) {
     const payload = buildPeakDetectionPayload(options);
     const spectrumId = options.spectrumId || activeSpectrumId;
-    const response = await fetch(peakDetectionApi, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    const requestStartedAt = performance.now();
+    const payloadSummary = {
+      schemaVersion: payload.schemaVersion,
+      spectrumId,
+      spectra: payload.spectra.map((spectrum) => ({ id: spectrum.id, points: spectrum.points.length })),
+      baselineMethod: payload.settings.baselineMethod,
+      signalType: payload.spectra[0]?.signalType || 'unknown',
+      smoothingWindow: payload.settings.smoothingWindow,
+      minProminence: payload.settings.minProminence,
+      minSeparationCm1: payload.settings.minSeparationCm1,
+      searchRangeCm1: payload.settings.searchRangeCm1,
+      allSpectra: Boolean(options.allSpectra),
+    };
+    clientLog('peak.request.start', { url: peakDetectionApi, ...payloadSummary });
+    let response;
+    try {
+      response = await fetch(peakDetectionApi, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      clientError('peak.request.network_error', {
+        url: peakDetectionApi,
+        name: error.name,
+        message: error.message,
+        durationMs: Math.round(performance.now() - requestStartedAt),
+        hint: 'Check Tunnel route, Access login, CORS and browser network errors.',
+      });
+      throw error;
+    }
     const body = await response.json().catch(() => ({}));
+    clientLog('peak.request.response', {
+      url: peakDetectionApi,
+      status: response.status,
+      ok: response.ok,
+      contentType: response.headers.get('content-type'),
+      durationMs: Math.round(performance.now() - requestStartedAt),
+      returnedSpectra: Array.isArray(body.processing) ? body.processing.map((item) => item.spectrumId) : [],
+      returnedPeaks: Array.isArray(body.peakObservations) ? body.peakObservations.length : null,
+      engine: body.engine || null,
+      error: body.error || null,
+    });
     if (!response.ok) throw new Error(body.error || `Peak detection failed (${response.status})`);
     const processing = Array.isArray(body.processing)
       ? body.processing.find((item) => item.spectrumId === spectrumId)
@@ -1796,6 +1870,11 @@ let peaksTableCollapsed = false;
     if (!activeSpectrumId || !lastData?.length || !peakProcessingChart) return;
     const spectrumId = activeSpectrumId;
     const requestId = ++baselinePreviewRequest;
+    clientLog('baseline.preview.start', {
+      spectrumId,
+      method: detectorBaselineMethod?.value || 'arpls',
+      signalType: detectorSignalType?.value || 'unknown',
+    });
     if (peakProcessingMeta) peakProcessingMeta.textContent = t('detectorPreviewing');
     peakProcessingChart.textContent = t('detectorPreviewing');
     try {
@@ -1804,9 +1883,16 @@ let peaksTableCollapsed = false;
         spectrumId,
       });
       if (requestId !== baselinePreviewRequest) return;
+      clientLog('baseline.preview.complete', {
+        spectrumId,
+        method: processing?.baselineMethod,
+        engine: processing?.baselineEngine,
+        diagnostics: processing?.diagnostics?.x?.length || 0,
+      });
       renderPeakProcessingDiagnostics(processing, { compact: true });
     } catch (error) {
       if (requestId !== baselinePreviewRequest) return;
+      clientError('baseline.preview.error', { spectrumId, name: error.name, message: error.message });
       peakProcessingChart.textContent = error.message || t('detectorUnavailable');
       if (peakProcessingMeta) peakProcessingMeta.textContent = t('detectorUnavailable');
     }
@@ -1818,6 +1904,12 @@ let peaksTableCollapsed = false;
     const requestId = ++baselineApplyRequest;
     const selectedBaselineMethod = detectorBaselineMethod?.value || 'arpls';
     const selectedSignalType = detectorSignalType?.value || 'unknown';
+    clientLog('baseline.apply.start', {
+      spectrumId,
+      method: selectedBaselineMethod,
+      signalType: selectedSignalType,
+      spectraCount: lastSpectra.length,
+    });
     if (applyPeakBaselineBtn) applyPeakBaselineBtn.disabled = true;
     if (detectorStatus) detectorStatus.textContent = t('detectorApplying');
     try {
@@ -1827,6 +1919,15 @@ let peaksTableCollapsed = false;
         allSpectra: true,
       });
       const processedItems = Array.isArray(body.processing) ? body.processing : [];
+      clientLog('baseline.apply.response', {
+        spectrumId,
+        processedSpectra: processedItems.map((item) => ({
+          spectrumId: item.spectrumId,
+          method: item.baselineMethod,
+          engine: item.baselineEngine,
+          diagnostics: item.diagnostics?.x?.length || 0,
+        })),
+      });
       processedItems.forEach((item) => {
         if (!item?.spectrumId) return;
         detectorProcessedBySpectrum.set(item.spectrumId, item);
@@ -1850,7 +1951,16 @@ let peaksTableCollapsed = false;
       if (peakDetectorSettingsDialog?.open) peakDetectorSettingsDialog.close();
       setStatus(t('detectorApplied'));
       if (detectorStatus) detectorStatus.textContent = `${t('detectorReady')} · ${processing.baselineMethod}/${processing.baselineEngine || 'baseline'}`;
+      clientLog('baseline.apply.complete', {
+        selectedSpectrumId: activeSpectrumId,
+        processedSpectra: detectorProcessedBySpectrum.size,
+      });
     } catch (error) {
+      clientError('baseline.apply.error', {
+        spectrumId,
+        name: error.name,
+        message: error.message,
+      });
       if (detectorStatus) detectorStatus.textContent = error.message || t('detectorUnavailable');
       setStatus(t('detectorUnavailable'), true);
     } finally {
@@ -1868,6 +1978,17 @@ let peaksTableCollapsed = false;
     const selectedBaselineMethod = detectorBaselineMethod?.value || 'arpls';
     const selectedSignalType = detectorSignalType?.value || 'unknown';
     const payload = buildPeakDetectionPayload();
+    clientLog('peaks.detect.start', {
+      spectrumId,
+      method: payload.settings.baselineMethod,
+      signalType: selectedSignalType,
+      searchRangeCm1: payload.settings.searchRangeCm1,
+      parameters: {
+        minProminence: payload.settings.minProminence,
+        minSeparationCm1: payload.settings.minSeparationCm1,
+        smoothingWindow: payload.settings.smoothingWindow,
+      },
+    });
     if (detectorStatus) detectorStatus.textContent = `Detecting in ${payload.spectra.length} spectra...`;
     if (detectPeaksBtn) {
       detectPeaksBtn.disabled = true;
@@ -1882,6 +2003,18 @@ let peaksTableCollapsed = false;
         return Number.isFinite(nu) && nu >= searchRange.min && nu <= searchRange.max;
       });
       const processing = responseProcessing;
+      clientLog('peaks.detect.response', {
+        spectrumId,
+        returnedPeaks: detected.length,
+        acceptedPeaks: detectedInRange.length,
+        engine: body.engine || null,
+        warnings: body.warnings || [],
+        processing: {
+          baselineMethod: processing?.baselineMethod,
+          baselineEngine: processing?.baselineEngine,
+          diagnostics: processing?.diagnostics?.x?.length || 0,
+        },
+      });
       detectorProcessedBySpectrum.set(spectrumId, processing);
       if (payload.settings.baselineMethod === 'none') {
         // A raw search must not turn an unapplied selection into an applied
@@ -1937,8 +2070,13 @@ let peaksTableCollapsed = false;
       renderStripesTable();
       scheduleLocalSave();
       setStatus(`Detected ${detectedInRange.length} peaks in ${searchRange.min}–${searchRange.max} cm⁻¹.`);
+      clientLog('peaks.detect.complete', {
+        spectrumId,
+        candidatesForSpectrum: activeSpectrumCandidates().length,
+        totalCandidates: stripeSets.candidates.length,
+      });
     } catch (error) {
-      console.error('[FTIR peak detection] request.failed', { url: peakDetectionApi, message: error.message });
+      clientError('peaks.detect.error', { url: peakDetectionApi, spectrumId, name: error.name, message: error.message });
       if (detectorStatus) detectorStatus.textContent = error.message || 'Detector unavailable.';
       setStatus('Peak detector unavailable.', true);
     } finally {
@@ -2670,6 +2808,7 @@ let peaksTableCollapsed = false;
       const response = await fetch(analysisApi, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
       console.info('[FTIR analysis] response', { status: response.status, ok: response.ok, durationMs: Math.round(performance.now() - startedAt) });
@@ -3181,6 +3320,20 @@ let peaksTableCollapsed = false;
     const nearestPoint = findNearestSpectrumPoint(xVal, spectrumId);
     const calculated = estimateManualPeakParameters(nearestPoint?.x ?? xVal, spectrumId);
     const peakX = calculated.originalNu ?? nearestPoint?.x ?? xVal;
+    clientLog('peak.manual.add', {
+      spectrumId,
+      x: peakX,
+      activeSet: activeStripeSet,
+      previousPeaksForSpectrum: current.length,
+      totalPeaksBefore: allStripes.length,
+      calculated: {
+        prominence: calculated.prominence ?? null,
+        widthCm1: calculated.widthCm1 ?? null,
+        fwhmCm1: calculated.fwhmCm1 ?? null,
+        shape: calculated.shape || null,
+        qualityFlags: calculated.qualityFlags || [],
+      },
+    });
     // `currentStripes()` is intentionally filtered to the selected spectrum
     // for display. Do not use that filtered array as the replacement for the
     // whole set, otherwise manual insertion removes peaks from other spectra.
