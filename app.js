@@ -45,6 +45,7 @@
   const detectorSmoothingWindow = document.getElementById('detectorSmoothingWindow');
   const detectPeaksBtn = document.getElementById('detectPeaks');
   const detectorStatus = document.getElementById('detectorStatus');
+  const detectorConnectionStatus = document.getElementById('detectorConnectionStatus');
   const peakDetectionHelpBtn = document.getElementById('peakDetectionHelp');
   const peakDetectionHelpDialog = document.getElementById('peakDetectionHelpDialog');
   const closePeakDetectionHelpBtn = document.getElementById('closePeakDetectionHelp');
@@ -280,6 +281,12 @@ let localSaveTimer = null;
   function setStatus(msg, isError = false) {
     statusEl.textContent = msg;
     statusEl.style.color = isError ? '#b91c1c' : '#0f172a';
+  }
+
+  function setDetectorConnectionStatus(message = '') {
+    if (!detectorConnectionStatus) return;
+    detectorConnectionStatus.textContent = message;
+    detectorConnectionStatus.hidden = !message;
   }
 
   function setRangeInputs({ xMin, xMax, yMin, yMax }) {
@@ -1826,6 +1833,7 @@ let localSaveTimer = null;
       allSpectra: Boolean(options.allSpectra),
     };
     clientLog('peak.request.start', { url: peakDetectionApi, ...payloadSummary });
+    setDetectorConnectionStatus('');
     let response;
     try {
       response = await fetch(peakDetectionApi, {
@@ -1842,6 +1850,7 @@ let localSaveTimer = null;
         durationMs: Math.round(performance.now() - requestStartedAt),
         hint: 'Check Tunnel route, Access login, CORS and browser network errors.',
       });
+      setDetectorConnectionStatus(`${t('detectorConnectionError')} (${error.message})`);
       throw error;
     }
     const body = await response.json().catch(() => ({}));
@@ -1856,11 +1865,18 @@ let localSaveTimer = null;
       engine: body.engine || null,
       error: body.error || null,
     });
-    if (!response.ok) throw new Error(body.error || `Peak detection failed (${response.status})`);
+    if (!response.ok) {
+      setDetectorConnectionStatus(`${t('detectorConnectionError')} HTTP ${response.status}${body.error ? `: ${body.error}` : ''}`);
+      throw new Error(body.error || `Peak detection failed (${response.status})`);
+    }
+    setDetectorConnectionStatus('');
     const processing = Array.isArray(body.processing)
       ? body.processing.find((item) => item.spectrumId === spectrumId)
       : null;
-    if (!processing) throw new Error('The server returned no processing data for the active spectrum.');
+    if (!processing) {
+      setDetectorConnectionStatus(t('detectorConnectionError'));
+      throw new Error('The server returned no processing data for the active spectrum.');
+    }
     return { payload, body, processing, spectrumId };
   }
 
