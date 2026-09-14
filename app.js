@@ -3165,6 +3165,9 @@ let peaksTableCollapsed = false;
             const cn = viewport.xMin;
             return (cx + cn) / 2;
           })();
+    const allStripes = Array.isArray(stripeSets[activeStripeSet])
+      ? stripeSets[activeStripeSet]
+      : [];
     const current = currentStripes();
     const color = stripeColors[current.length % stripeColors.length];
     stripeIdSeq += 1;
@@ -3178,7 +3181,10 @@ let peaksTableCollapsed = false;
     const nearestPoint = findNearestSpectrumPoint(xVal, spectrumId);
     const calculated = estimateManualPeakParameters(nearestPoint?.x ?? xVal, spectrumId);
     const peakX = calculated.originalNu ?? nearestPoint?.x ?? xVal;
-    stripeSets[activeStripeSet] = [...current, {
+    // `currentStripes()` is intentionally filtered to the selected spectrum
+    // for display. Do not use that filtered array as the replacement for the
+    // whole set, otherwise manual insertion removes peaks from other spectra.
+    stripeSets[activeStripeSet] = [...allStripes, {
       id: `stripe-${stripeIdSeq}`,
       peakId,
       spectrumId,
