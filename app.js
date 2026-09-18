@@ -299,6 +299,37 @@ let localSaveTimer = null;
     detectorConnectionStatus.hidden = !message;
   }
 
+  async function diagnoseApiAccess() {
+    let healthUrl;
+    try {
+      healthUrl = new URL('/health', analysisApi).toString();
+      const startedAt = performance.now();
+      const response = await fetch(healthUrl, {
+        method: 'GET',
+        credentials: apiCredentials,
+        cache: 'no-store',
+      });
+      const diagnostic = {
+        healthUrl,
+        status: response.status,
+        ok: response.ok,
+        redirected: response.redirected,
+        responseUrl: response.url,
+        durationMs: Math.round(performance.now() - startedAt),
+      };
+      clientLog('api.access.diagnostic', diagnostic);
+      return diagnostic;
+    } catch (error) {
+      const diagnostic = {
+        healthUrl: healthUrl || null,
+        name: error.name,
+        message: error.message,
+      };
+      clientError('api.access.diagnostic_failed', diagnostic);
+      return diagnostic;
+    }
+  }
+
   function setRangeInputs({ xMin, xMax, yMin, yMax }) {
     if (typeof xMin === 'number') xMinInput.value = String(xMin);
     if (typeof xMax === 'number') xMaxInput.value = String(xMax);
@@ -3132,12 +3163,14 @@ let localSaveTimer = null;
       scheduleLocalSave();
       setStatus('Confirmed peaks analyzed.');
     } catch (error) {
+      const accessDiagnostic = await diagnoseApiAccess();
       console.error('[FTIR analysis] request.failed', {
         url: analysisApi,
         origin: window.location.origin,
         name: error.name,
         message: error.message,
         hint: 'Check backend process, URL and CORS settings.',
+        accessDiagnostic,
       });
       if (analysisStatus) analysisStatus.textContent = 'Unavailable';
       if (analysisResult) analysisResult.textContent = error.message || 'Analysis failed';
