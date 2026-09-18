@@ -3158,7 +3158,9 @@ let localSaveTimer = null;
       analysisData = body.result || body;
       applyAnalysisSuggestions(analysisData);
       if (analysisResult) analysisResult.innerHTML = renderAnalysisReport(analysisData);
-      if (stripeSets.confirmed?.length) setActiveStripeSet('confirmed');
+      // Analysis must not change the user's current chart context. In
+      // particular, switching Candidates → Confirmed forces a redraw and can
+      // make an auto-scaled view look as if it has jumped.
       renderStripesTable();
       scheduleLocalSave();
       setStatus('Confirmed peaks analyzed.');
