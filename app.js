@@ -6,6 +6,12 @@
   const chartSettings = config.chart || {};
   const analysisApi = config.analysisApi || '/api/analyze';
   const peakDetectionApi = config.peakDetectionApi || analysisApi.replace(/\/api\/analyze$/, '/api/peaks/detect');
+  const apiHostname = new URL(analysisApi, window.location.href).hostname;
+  const localApi = apiHostname === 'localhost' || apiHostname === '127.0.0.1' || apiHostname === '::1';
+  // Disk pages and a local API use wildcard CORS and must not send cookies.
+  // A hosted API retains cookies required by Cloudflare Access. The setting
+  // can be overridden in config.js for a custom authentication setup.
+  const apiCredentials = config.apiCredentials || (window.location.protocol === 'file:' || localApi ? 'omit' : 'include');
   const DEBUG_LOGGING = config.debugLogging !== false;
   const clientLog = (event, details = {}) => {
     if (DEBUG_LOGGING) console.info(`[FTIR] ${event}`, details);
@@ -140,6 +146,9 @@ let chartViewport = {
   yMin: null,
   yMax: null,
 };
+// An automatic Y range follows the loaded spectra. Store a separate flag for
+// a deliberate Y pan/zoom so stale local-session coordinates never override it.
+let chartYViewportActive = false;
 const BASELINE_DISABLED = true;
 let stripeSets = {
   candidates: [],
@@ -174,6 +183,7 @@ let localSaveTimer = null;
     pageOrigin: window.location.origin,
     analysisApi,
     peakDetectionApi,
+    apiCredentials,
     language: currentLang,
     debugLogging: DEBUG_LOGGING,
   });
@@ -310,7 +320,7 @@ let localSaveTimer = null;
     return { min: Math.min(lower, upper), max: Math.max(lower, upper) };
   }
 
-  function updateNavigationBoundsFromInputs() {
+  function updateNavigationBoundsFromInputs({ resetAutoY = false } = {}) {
     const xBounds = normalizeBounds(
       xMinInput.value,
       xMaxInput.value,
@@ -328,11 +338,15 @@ let localSaveTimer = null;
       chartNavigationBounds.yMax = Math.max(yMin, yMax);
       chartViewport.yMin = chartNavigationBounds.yMin;
       chartViewport.yMax = chartNavigationBounds.yMax;
-    } else if (yMinInput.value === '' && yMaxInput.value === '') {
+      chartYViewportActive = false;
+    } else if (resetAutoY) {
+      // A single value or equal values (for example the legacy 0 / 0 state)
+      // are not a usable range. Return to the data-driven automatic domain.
       chartNavigationBounds.yMin = null;
       chartNavigationBounds.yMax = null;
       chartViewport.yMin = null;
       chartViewport.yMax = null;
+      chartYViewportActive = false;
     }
   }
 
@@ -364,11 +378,13 @@ let localSaveTimer = null;
 
   function getChartViewport(autoExtent) {
     const navigationBounds = getNavigationBounds(autoExtent);
-    const yIsAuto = yMinInput?.value === '' && yMaxInput?.value === ''
-      && chartNavigationBounds.yMin === null
-      && chartNavigationBounds.yMax === null;
-    const yMin = yIsAuto ? null : finiteNumber(chartViewport.yMin);
-    const yMax = yIsAuto ? null : finiteNumber(chartViewport.yMax);
+    const hasFixedYBounds = chartNavigationBounds.yMin !== null && chartNavigationBounds.yMax !== null;
+    const storedYMin = finiteNumber(chartViewport.yMin);
+    const storedYMax = finiteNumber(chartViewport.yMax);
+    const useStoredY = (hasFixedYBounds || chartYViewportActive)
+      && storedYMin !== null && storedYMax !== null && storedYMin !== storedYMax;
+    const yMin = useStoredY ? storedYMin : null;
+    const yMax = useStoredY ? storedYMax : null;
     return {
       xMin: finiteNumber(chartViewport.xMin) ?? navigationBounds.xMin,
       xMax: finiteNumber(chartViewport.xMax) ?? navigationBounds.xMax,
@@ -377,7 +393,7 @@ let localSaveTimer = null;
     };
   }
 
-  function setChartViewport(viewport = {}, autoExtent = null) {
+  function setChartViewport(viewport = {}, autoExtent = null, { restoreY = false } = {}) {
     const hasDataExtent = Array.isArray(autoExtent)
       && autoExtent.length === 2
       && Number.isFinite(Number(autoExtent[0]))
@@ -390,7 +406,9 @@ let localSaveTimer = null;
     const yMax = finiteNumber(viewport.yMax);
     let nextYMin = null;
     let nextYMax = null;
-    if (yMin !== null && yMax !== null) {
+    const hasFixedYBounds = chartNavigationBounds.yMin !== null && chartNavigationBounds.yMax !== null;
+    const canRestoreY = hasFixedYBounds || restoreY;
+    if (canRestoreY && yMin !== null && yMax !== null && yMin !== yMax) {
       [nextYMin, nextYMax] = chartNavigationBounds.yMin !== null && chartNavigationBounds.yMax !== null
         ? clampViewport(yMin, yMax, bounds.yMin, bounds.yMax)
         : hasDataExtent
@@ -398,6 +416,7 @@ let localSaveTimer = null;
           : [Math.min(yMin, yMax), Math.max(yMin, yMax)];
     }
     chartViewport = { xMin, xMax, yMin: nextYMin, yMax: nextYMax };
+    chartYViewportActive = !hasFixedYBounds && restoreY && nextYMin !== null && nextYMax !== null;
   }
 
   function clampViewport(min, max, boundsMin, boundsMax) {
@@ -911,6 +930,9 @@ let localSaveTimer = null;
       yMin: zoomY ? nextYMin : chartViewport.yMin,
       yMax: zoomY ? nextYMax : chartViewport.yMax,
     };
+    if (zoomY && chartNavigationBounds.yMin === null && chartNavigationBounds.yMax === null) {
+      chartYViewportActive = true;
+    }
     renderChartFromData(lastData);
     scheduleLocalSave();
   }
@@ -1084,10 +1106,21 @@ let localSaveTimer = null;
     if (activeStripes.length) {
       const stripesLayer = g.append('g').attr('class', 'user-stripes');
       const isCandidates = activeStripeSet === 'candidates';
+      const setStripeHover = (stripeId = null) => {
+        stripesLayer.selectAll('.user-stripe')
+          .classed('is-highlighted', function() { return stripeId !== null && this.dataset.stripeId === String(stripeId); })
+          .classed('is-muted', function() { return stripeId !== null && this.dataset.stripeId !== String(stripeId); });
+      };
       activeStripes.forEach((stripe) => {
         const sx = x(stripe.x);
-        stripesLayer
+        const stripeKey = String(stripe.id || stripe.peakId || stripe.x);
+        const stripeGroup = stripesLayer
+          .append('g')
+          .attr('class', 'user-stripe')
+          .attr('data-stripe-id', stripeKey);
+        stripeGroup
           .append('line')
+          .attr('class', 'stripe-line')
           .attr('x1', sx)
           .attr('x2', sx)
           .attr('y1', 0)
@@ -1096,15 +1129,40 @@ let localSaveTimer = null;
           .attr('stroke-width', isCandidates ? 1.4 : 2.2)
           .attr('stroke-dasharray', isCandidates ? '6,4' : '4,2')
           .attr('opacity', isCandidates ? 0.7 : 1);
-        stripesLayer
+        const stripeLabel = stripeGroup
           .append('text')
+          .attr('class', 'stripe-label')
           .attr('x', sx)
           .attr('y', -8)
           .attr('text-anchor', 'middle')
           .attr('fill', '#111827')
           .attr('font-size', 12)
           .attr('font-weight', '700')
+          .attr('tabindex', 0)
+          .attr('role', 'button')
+          .attr('aria-label', t('peakLabelEditAria', stripe.x.toFixed(2)))
+          .attr('title', t('peakLabelEditHint'))
           .text(`${stripe.x.toFixed(0)}`);
+        const startEditing = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openStripePositionEditor({
+            stripe,
+            stripeLabel,
+            stripesLayer,
+            xPosition: sx,
+            chartWidth: innerW,
+          });
+        };
+        stripeLabel
+          .on('pointerdown', (event) => event.stopPropagation())
+          .on('click', startEditing)
+          .on('mouseenter', () => setStripeHover(stripeKey))
+          .on('mouseleave', () => setStripeHover())
+          .on('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            startEditing(event);
+          });
       });
     }
 
@@ -1309,9 +1367,21 @@ let localSaveTimer = null;
       updateZoneHighlight(xVal);
     };
 
-  const isPanEvent = (evt) => evt.button === 1 || evt.buttons === 4;
+    const isPanEvent = (evt) => evt.button === 1 || evt.buttons === 4;
 
     svg.on('contextmenu', (e) => e.preventDefault());
+
+    svg.on('wheel.chartZoom', (event) => {
+      // Keep ordinary wheel scrolling available for the page. Hold Ctrl on
+      // Windows/Linux or Cmd on macOS to zoom the chart around the cursor.
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const [px, py] = d3.pointer(event, g.node());
+      if (px < 0 || px > innerW || py < 0 || py > innerH) return;
+      const factor = event.deltaY > 0 ? 1.12 : 0.88;
+      applyZoom(factor, x.invert(px), y.invert(py), { x: true, y: true });
+    });
 
     svg.on('pointerdown', (event) => {
       const [px, py] = d3.pointer(event, g.node());
@@ -1371,6 +1441,9 @@ let localSaveTimer = null;
                 yMin: qMinY,
                 yMax: qMaxY,
               };
+              if (chartNavigationBounds.yMin === null && chartNavigationBounds.yMax === null) {
+                chartYViewportActive = true;
+              }
               renderChartFromData(lastData, { skipLegend: true });
             }
             panQueued = null;
@@ -1454,6 +1527,10 @@ let localSaveTimer = null;
         yMin: currYMin,
         yMax: currYMax,
       };
+      if ((key === 'ArrowUp' || key === 'ArrowDown')
+        && chartNavigationBounds.yMin === null && chartNavigationBounds.yMax === null) {
+        chartYViewportActive = true;
+      }
       renderChartFromData(lastData, { skipLegend: true });
     };
     svg.on('keydown', handleKeyPan);
@@ -1651,15 +1728,33 @@ let localSaveTimer = null;
       yMaxInput.value = opts.yRange.max ?? '';
     }
     if (opts.chartBounds) setNavigationBounds(opts.chartBounds);
+    const hasFixedYBounds = chartNavigationBounds.yMin !== null && chartNavigationBounds.yMax !== null;
+    const requestedYViewport = opts.yViewportActive === true;
+    const inputYMin = finiteNumber(yMinInput.value);
+    const inputYMax = finiteNumber(yMaxInput.value);
+    if (!hasFixedYBounds && (inputYMin === null || inputYMax === null || inputYMin === inputYMax)) {
+      // Equal/partial saved values cannot form an axis range. In particular,
+      // this recovers sessions created before Y viewport state was explicit.
+      yMinInput.value = '';
+      yMaxInput.value = '';
+      chartNavigationBounds.yMin = null;
+      chartNavigationBounds.yMax = null;
+    }
     if (opts.viewport) {
-      setChartViewport(opts.viewport, defaultYRange);
+      setChartViewport(opts.viewport, defaultYRange, { restoreY: requestedYViewport });
     } else if (opts.chartBounds) {
-      setChartViewport(opts.chartBounds, defaultYRange);
+      setChartViewport(opts.chartBounds, defaultYRange, { restoreY: requestedYViewport });
     }
     if (yMinInput.value === '' && yMaxInput.value === ''
       && chartNavigationBounds.yMin === null && chartNavigationBounds.yMax === null) {
-      chartViewport.yMin = null;
-      chartViewport.yMax = null;
+      if (!requestedYViewport) {
+        chartViewport.yMin = null;
+        chartViewport.yMax = null;
+      }
+      chartYViewportActive = requestedYViewport
+        && finiteNumber(chartViewport.yMin) !== null
+        && finiteNumber(chartViewport.yMax) !== null
+        && chartViewport.yMin !== chartViewport.yMax;
     }
     downloadLinkEl.textContent = '';
     if (failedFiles.length) {
@@ -1839,7 +1934,7 @@ let localSaveTimer = null;
       response = await fetch(peakDetectionApi, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        credentials: 'include',
+        credentials: apiCredentials,
         body: JSON.stringify(payload),
       });
     } catch (error) {
@@ -2110,6 +2205,77 @@ let localSaveTimer = null;
     return activeSpectrumId
       ? (stripeSets.candidates || []).filter((stripe) => stripe.spectrumId === activeSpectrumId)
       : [];
+  }
+
+  function commitStripePosition(stripe, value) {
+    const parsed = Number(String(value).trim().replace(',', '.'));
+    if (!Number.isFinite(parsed)) {
+      setStatus('Enter a valid peak position.', true);
+      return false;
+    }
+    stripe.x = Number(parsed.toFixed(2));
+    // Once moved, this is a user-adjusted observation. Recalculate the
+    // available local parameters for the spectrum instead of retaining values
+    // measured at the detector's previous position.
+    Object.assign(stripe, estimateManualPeakParameters(stripe.x, stripe.spectrumId));
+    stripe.source = 'manual';
+    renderChartFromData(lastData, { skipLegend: true });
+    renderStripesTable();
+    scheduleLocalSave();
+    setStatus(`Peak moved to ${stripe.x.toFixed(2)} cm⁻¹.`);
+    return true;
+  }
+
+  function openStripePositionEditor({ stripe, stripeLabel, stripesLayer, xPosition, chartWidth }) {
+    if (!stripe || !stripeLabel?.node?.()) return;
+    const editorWidth = 78;
+    const editorX = Math.max(0, Math.min(chartWidth - editorWidth, xPosition - editorWidth / 2));
+    let finished = false;
+    const editor = stripesLayer
+      .append('foreignObject')
+      .attr('class', 'stripe-position-editor-wrap')
+      .attr('x', editorX)
+      .attr('y', -18)
+      .attr('width', editorWidth)
+      .attr('height', 25);
+    const input = editor
+      .append('xhtml:input')
+      .attr('class', 'stripe-position-editor')
+      .attr('type', 'text')
+      .attr('inputmode', 'decimal')
+      .attr('aria-label', t('peakLabelEditAria', stripe.x.toFixed(2)))
+      .property('value', stripe.x.toFixed(2));
+    const finish = (save) => {
+      if (finished) return;
+      finished = true;
+      const nextValue = input.property('value');
+      editor.remove();
+      if (save) {
+        commitStripePosition(stripe, nextValue);
+      } else {
+        stripeLabel.style('display', null);
+        stripeLabel.node()?.focus();
+      }
+    };
+    stripeLabel.style('display', 'none');
+    editor
+      .on('pointerdown', (event) => event.stopPropagation())
+      .on('click', (event) => event.stopPropagation());
+    input
+      .on('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          finish(true);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+        }
+      })
+      .on('blur', () => finish(true));
+    requestAnimationFrame(() => {
+      input.node()?.focus();
+      input.node()?.select();
+    });
   }
 
   function findNearestSpectrumPoint(xVal, spectrumId = null) {
@@ -2406,7 +2572,7 @@ let localSaveTimer = null;
 
   function buildSessionSnapshot() {
     return {
-      version: 2,
+      version: 3,
       settings: buildPersistentSettings(),
       files: lastFilesRaw,
       fileName: fileNameInput.value,
@@ -2423,6 +2589,7 @@ let localSaveTimer = null;
       yRange: { min: yMinInput.value, max: yMaxInput.value },
       chartBounds: { ...chartNavigationBounds },
       viewport: { ...chartViewport },
+      yViewportActive: chartYViewportActive,
       customNames: Object.fromEntries(customNames),
       analysisPrompt: analysisPromptInput?.value || '',
       analysis: analysisData,
@@ -2454,6 +2621,7 @@ let localSaveTimer = null;
         yRange: { min: yMinInput?.value ?? '', max: yMaxInput?.value ?? '' },
         bounds: { ...chartNavigationBounds },
         viewport: { ...chartViewport },
+        yViewportActive: chartYViewportActive,
         visibleSeries: Object.fromEntries(visibleSeries),
       },
       peaks: {
@@ -2511,16 +2679,31 @@ let localSaveTimer = null;
       yMin: yRange.min,
       yMax: yRange.max,
     });
+    const hasFixedYBounds = chartNavigationBounds.yMin !== null && chartNavigationBounds.yMax !== null;
+    const inputYMin = finiteNumber(yMinInput.value);
+    const inputYMax = finiteNumber(yMaxInput.value);
+    if (!hasFixedYBounds && (inputYMin === null || inputYMax === null || inputYMin === inputYMax)) {
+      yMinInput.value = '';
+      yMaxInput.value = '';
+      chartNavigationBounds.yMin = null;
+      chartNavigationBounds.yMax = null;
+    }
     setChartViewport(chart.viewport || {
       xMin: xRange.min,
       xMax: xRange.max,
       yMin: yRange.min,
       yMax: yRange.max,
-    }, defaultYRange);
+    }, defaultYRange, { restoreY: chart.yViewportActive === true });
     if (yMinInput.value === '' && yMaxInput.value === ''
       && chartNavigationBounds.yMin === null && chartNavigationBounds.yMax === null) {
-      chartViewport.yMin = null;
-      chartViewport.yMax = null;
+      if (chart.yViewportActive !== true) {
+        chartViewport.yMin = null;
+        chartViewport.yMax = null;
+      }
+      chartYViewportActive = chart.yViewportActive === true
+        && finiteNumber(chartViewport.yMin) !== null
+        && finiteNumber(chartViewport.yMax) !== null
+        && chartViewport.yMin !== chartViewport.yMax;
     }
     if (chart.visibleSeries && typeof chart.visibleSeries === 'object') {
       visibleSeries = new Map(Object.entries(chart.visibleSeries));
@@ -2592,7 +2775,7 @@ let localSaveTimer = null;
       const raw = localStorage.getItem(LOCAL_SESSION_KEY);
       if (!raw) return;
       const session = JSON.parse(raw);
-      if (!session || ![1, 2].includes(session.version) || !Array.isArray(session.files) || !session.files.length) return;
+      if (!session || ![1, 2, 3].includes(session.version) || !Array.isArray(session.files) || !session.files.length) return;
       if (session.settings) applyPersistentSettings(session.settings);
       lastFilesRaw = session.files.map((file) => ({ name: file.name, content: file.content }));
       spectrumRoles = new Map((session.spectra || [])
@@ -2619,6 +2802,7 @@ let localSaveTimer = null;
         yRange: session.yRange,
         chartBounds: session.chartBounds || session.settings?.chart?.bounds,
         viewport: session.viewport || session.settings?.chart?.viewport,
+        yViewportActive: session.yViewportActive ?? session.settings?.chart?.yViewportActive,
         customNames: session.customNames,
         stripeSets,
         markerSpectrumId: session.markerSpectrumId,
@@ -2824,7 +3008,7 @@ let localSaveTimer = null;
       const response = await fetch(analysisApi, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        credentials: 'include',
+        credentials: apiCredentials,
         body: JSON.stringify(payload),
       });
       console.info('[FTIR analysis] response', { status: response.status, ok: response.ok, durationMs: Math.round(performance.now() - startedAt) });
@@ -2893,6 +3077,7 @@ let localSaveTimer = null;
     chartNavigationBounds.yMax = null;
     chartViewport.yMin = null;
     chartViewport.yMax = null;
+    chartYViewportActive = false;
     yMinInput.value = '';
     yMaxInput.value = '';
     updateBaselineSelectOptions();
@@ -2911,6 +3096,7 @@ let localSaveTimer = null;
     chartNavigationBounds.yMax = null;
     chartViewport.yMin = null;
     chartViewport.yMax = null;
+    chartYViewportActive = false;
     yMinInput.value = '';
     yMaxInput.value = '';
     updateBaselineSelectOptions();
@@ -2955,13 +3141,7 @@ let localSaveTimer = null;
       val.className = 'peaks-input';
       val.value = stripe.x.toFixed(2);
       val.addEventListener('change', () => {
-        const num = Number(val.value);
-        if (!Number.isFinite(num)) return;
-        stripe.x = num;
-        if (stripe.source === 'manual') Object.assign(stripe, estimateManualPeakParameters(num, stripe.spectrumId));
-        renderChartFromData(lastData, { skipLegend: true });
-        renderStripesTable();
-        scheduleLocalSave();
+        commitStripePosition(stripe, val.value);
       });
 
       const nameCell = document.createElement('input');
@@ -3113,14 +3293,14 @@ let localSaveTimer = null;
     chartSettingsDialog.showModal();
   });
   closeChartSettingsBtn?.addEventListener('click', () => {
-    updateNavigationBoundsFromInputs();
+    updateNavigationBoundsFromInputs({ resetAutoY: true });
     applyRangeChanges();
     scheduleLocalSave();
     if (chartSettingsDialog?.open) chartSettingsDialog.close();
   });
   chartSettingsDialog?.addEventListener('click', (event) => {
     if (event.target === chartSettingsDialog) {
-      updateNavigationBoundsFromInputs();
+      updateNavigationBoundsFromInputs({ resetAutoY: true });
       applyRangeChanges();
       scheduleLocalSave();
       chartSettingsDialog.close();
@@ -3524,6 +3704,9 @@ let localSaveTimer = null;
         detectorProcessedBySpectrum: session.detectorProcessedBySpectrum,
         xRange: session.xRange,
         yRange: session.yRange,
+        chartBounds: session.chartBounds || session.settings?.chart?.bounds,
+        viewport: session.viewport || session.settings?.chart?.viewport,
+        yViewportActive: session.yViewportActive ?? session.settings?.chart?.yViewportActive,
         customNames: session.customNames,
         stripeSets: stripeSets,
         markerSpectrumId: session.markerSpectrumId,
@@ -3559,6 +3742,7 @@ let localSaveTimer = null;
       yMin: null,
       yMax: null,
     });
+    chartYViewportActive = false;
     setRangeInputs({
       xMax: defaultXRange.max,
       xMin: defaultXRange.min,
@@ -3574,18 +3758,18 @@ let localSaveTimer = null;
   };
   [xMinInput, xMaxInput, yMinInput, yMaxInput].forEach((el) => {
     el.addEventListener('input', () => {
-      updateNavigationBoundsFromInputs();
+      updateNavigationBoundsFromInputs({ resetAutoY: el === yMinInput || el === yMaxInput });
       scheduleLocalSave();
     });
     el.addEventListener('change', () => {
-      updateNavigationBoundsFromInputs();
+      updateNavigationBoundsFromInputs({ resetAutoY: el === yMinInput || el === yMaxInput });
       applyRangeChanges();
       scheduleLocalSave();
     });
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        updateNavigationBoundsFromInputs();
+        updateNavigationBoundsFromInputs({ resetAutoY: el === yMinInput || el === yMaxInput });
         applyRangeChanges();
         scheduleLocalSave();
       }
@@ -3666,6 +3850,7 @@ let localSaveTimer = null;
       yRange: { min: yMinInput.value, max: yMaxInput.value },
       chartBounds: { ...chartNavigationBounds },
       viewport: { ...chartViewport },
+      yViewportActive: chartYViewportActive,
       customNames: Object.fromEntries(customNames),
       markerSpectrumId,
       activeSpectrumId,
@@ -3702,6 +3887,7 @@ let localSaveTimer = null;
       yMin: null,
       yMax: null,
     };
+    chartYViewportActive = false;
     lastSpectra = [];
     spectrumRoles = new Map();
     lastFilesRaw = [];

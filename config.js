@@ -1,6 +1,7 @@
 window.APP_CONFIG = {
   supportedLangs: ['en', 'ru', 'sr'],
   // Local test: http://127.0.0.1:8787/api/analyze
+  //https://ftirllm.nikolaisemenov.com/api/analyze
   // Production: replace with the public HTTPS backend URL.
   analysisApi: 'http://127.0.0.1:8787/api/analyze',
   footerLinks: {
@@ -56,6 +57,9 @@ window.APP_CONFIG = {
       colLabel: 'Label',
       colTip: 'Tip',
       peakHint: 'Click the chart to place a marker, then add it here.',
+      peakLabelEditHint: 'Click a peak value to edit its position on the spectrum.',
+      peakLabelEditAria: (value) => `Edit peak position: ${value} cm⁻¹`,
+      chartInteractionHint: 'Ctrl/Cmd + scroll over the chart to zoom · middle mouse button to pan · arrow keys to pan',
       peakHelpEyebrow: 'Peak search',
       peakHelpTitle: 'Peak detector guide',
       peakHelpIntro: 'These settings affect how automatic peaks are selected for the active spectrum.',
@@ -181,6 +185,9 @@ window.APP_CONFIG = {
       colLabel: 'Метка',
       colTip: 'Подсказка',
       peakHint: 'Кликните по графику, чтобы поставить маркер, затем добавьте его сюда.',
+      peakLabelEditHint: 'Нажмите на значение пика, чтобы изменить его положение на спектре.',
+      peakLabelEditAria: (value) => `Изменить положение пика: ${value} см⁻¹`,
+      chartInteractionHint: 'Ctrl/Cmd + колесо над графиком — масштабирование · средняя кнопка мыши — перемещение · стрелки — перемещение',
       peakHelpEyebrow: 'Поиск пиков',
       peakHelpTitle: 'Справка по детектору пиков',
       peakHelpIntro: 'Эти настройки влияют на автоматический поиск пиков в активном спектре.',
@@ -306,6 +313,9 @@ window.APP_CONFIG = {
       colLabel: 'Oznaka',
       colTip: 'Savet',
       peakHint: 'Klik na graf postavlja marker, pa ga dodaj ovde.',
+      peakLabelEditHint: 'Kliknite vrednost vrha da promenite njegov položaj na spektru.',
+      peakLabelEditAria: (value) => `Promeni položaj vrha: ${value} cm⁻¹`,
+      chartInteractionHint: 'Ctrl/Cmd + točkić iznad grafa — zumiranje · srednje dugme miša — pomeranje · strelice — pomeranje',
       peakHelpEyebrow: 'Pretraga vrhova',
       peakHelpTitle: 'Vodič za detektor vrhova',
       peakHelpIntro: 'Ova podešavanja utiču na automatski izbor vrhova u aktivnom spektru.',

@@ -707,11 +707,65 @@ input[type="file"]::-webkit-file-upload-button {
   align-items: center;
 }
 
+.chart-interaction-hint {
+  margin: 0 2px 7px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 svg {
   width: 100%;
   height: 72vh;
   background: #f8fafc;
   border-radius: 12px;
+}
+
+.user-stripes .stripe-label {
+  cursor: text;
+  paint-order: stroke;
+  stroke: #f8fafc;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.user-stripes .user-stripe {
+  transition: opacity 120ms ease;
+}
+
+.user-stripes .user-stripe.is-muted {
+  opacity: 0.2;
+}
+
+.user-stripes .user-stripe.is-highlighted .stripe-line {
+  stroke-width: 3px;
+  opacity: 1;
+}
+
+.user-stripes .user-stripe.is-highlighted .stripe-label {
+  fill: var(--primary);
+}
+
+.user-stripes .stripe-label:hover,
+.user-stripes .stripe-label:focus {
+  fill: var(--primary);
+  text-decoration: underline;
+  outline: none;
+}
+
+.stripe-position-editor {
+  box-sizing: border-box;
+  display: block;
+  width: 78px;
+  height: 24px;
+  border: 1px solid var(--primary);
+  border-radius: 5px;
+  padding: 2px 5px;
+  background: #fff;
+  color: var(--text);
+  font: 700 12px/1.2 var(--font, system-ui, sans-serif);
+  text-align: center;
+  outline: none;
 }
 
 .legend-wrap {
