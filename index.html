@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="styles.css">
   <script src="./d3.min.js"></script>
   <script src="./jcampconverter.min.js"></script>
+  <script src="https://unpkg.com/smiles-drawer@2.4.1/dist/smiles-drawer.min.js"></script>
 </head>
 <body>
   <nav class="tool-nav" aria-label="Multitool">
@@ -77,9 +78,12 @@
 
       <div class="chart-tabs-row">
         <div id="chartLegend" class="spectrum-tabs nav nav-tabs" role="tablist" aria-label="Open spectra"></div>
-        <button id="openChartSettings" class="icon-btn chart-settings-trigger" type="button" title="Chart settings" aria-label="Chart settings" disabled>
-          <span class="material-symbols-outlined">tune</span>
-        </button>
+        <div class="chart-actions">
+          <button id="searchLocalReferences" type="button" class="btn tonal chart-reference-search" hidden data-i18n="findReferenceMatches">Find reference matches (local)</button>
+          <button id="openChartSettings" class="icon-btn chart-settings-trigger" type="button" title="Chart settings" aria-label="Chart settings" disabled>
+            <span class="material-symbols-outlined">tune</span>
+          </button>
+        </div>
       </div>
       <div class="chart-row is-hidden" id="chartRow">
         <div class="chart-main">
@@ -89,6 +93,21 @@
         </div>
       </div>
     </div>
+
+    <aside class="reference-sidebar" id="referenceSearchCard" hidden aria-label="Reference search results">
+      <div class="reference-card-header">
+        <div>
+          <div class="eyebrow" data-i18n="referenceMatchesEyebrow">Whole-spectrum reference search</div>
+          <h3 data-i18n="referenceMatchesTitle">Reference matches</h3>
+          <p id="referenceSearchSpectrum" class="reference-spectrum-name"></p>
+        </div>
+        <span id="referenceSearchStatus" class="analysis-status"></span>
+      </div>
+      <div id="referenceSearchResult" class="reference-search-result" aria-live="polite"></div>
+    </aside>
+    <button id="referenceSidebarToggle" class="reference-sidebar-toggle" type="button" hidden aria-controls="referenceSearchCard" aria-expanded="false" title="Open reference results" aria-label="Open reference results">
+      <span class="material-symbols-outlined">chevron_left</span>
+    </button>
 
     <dialog id="chartSettingsDialog" class="chart-settings-dialog">
       <div class="dialog-header">
@@ -195,7 +214,6 @@
             <button id="copyStripes" type="button" class="btn tonal" data-i18n="copyStripes">Copy table</button>
             <button id="copyConfirmedPayload" type="button" class="btn tonal">Copy confirmed JSON</button>
             <button id="analyzeConfirmed" type="button" class="btn primary">Analyze confirmed</button>
-            <button id="searchLocalReferences" type="button" class="btn tonal" hidden data-i18n="findReferenceMatches">Find reference matches (local)</button>
           </div>
           <label class="analysis-prompt-field" for="analysisPrompt">
             <span data-i18n="analysisPromptLabel">Additional analysis context (optional)</span>
@@ -301,13 +319,6 @@
         <span id="analysisStatus" class="analysis-status"></span>
       </div>
       <div id="analysisResult" class="analysis-result" aria-live="polite"></div>
-    </div>
-    <div class="card surface analysis-card reference-card" id="referenceSearchCard" hidden>
-      <div class="peaks-header">
-        <h3 data-i18n="referenceMatchesTitle">Reference matches</h3>
-        <span id="referenceSearchStatus" class="analysis-status"></span>
-      </div>
-      <div id="referenceSearchResult" class="analysis-result" aria-live="polite"></div>
     </div>
     <dialog id="appSettingsDialog" class="app-settings-dialog">
       <form id="appSettingsForm" method="dialog">

@@ -826,3 +826,45 @@ Production bridge.
 - /api/reference-matches в основном FTIR server.
 - Service token остаётся между серверами.
 - UI работает через основной API, без CORS и токенов в браузере.
+
+## 16. Статус reference service и UI на 2026-09-23
+
+### Сделано
+
+- Создан отдельный вложенный Git-репозиторий `ftir-reference-service`; он
+  игнорируется основным репозиторием и синхронизируется независимо.
+- Реализован FastAPI service с admin token, service token, health/status,
+  фоновым индексированием локальных Parquet и загрузкой полного Zenodo-набора
+  с resume/checksum.
+- Локальный test catalogue успешно индексирует один Parquet chunk (20 000
+  computed spectra); API `POST /api/v1/search` работает.
+- Static frontend получил локальный runtime profile в `settings.js`: dev/prod
+  URL, provider/model, BYOK, Bearer/service tokens, безопасный export и
+  encrypted export. На localhost/file он по умолчанию знает порты `8787` и
+  `8088`.
+- В dev-режиме reference search запускается у вкладок диаграммы, использует
+  полную кривую активного спектра и сохраняет результат отдельно по
+  `spectrumId` в сессии.
+- Результаты вынесены в выезжающую правую панель. SMILES визуализируется в
+  browser с SmilesDrawer; `≥ 60%` автоматически получает название/формулу из
+  PubChem, а менее похожие кандидаты делают это только по клику.
+
+### Зафиксированное ограничение данных
+
+Zenodo Parquet содержит только `id`, `smiles`, `Frequency(cm^-1)` и
+`ir_spectra`; в нём нет common/IUPAC names, CAS или formula. Имена не
+показываются как данные набора: reference service использует отдельный
+кэшированный SMILES→metadata lookup через PubChem PUG REST с явной пометкой
+внешнего источника. Он не меняет score и не подтверждает идентификацию.
+
+### Следующее перед production deploy
+
+1. Прогнать UI с несколькими спектрами: поиск по каждой вкладке, переключение
+   вкладок, сохранение/восстановление локальной сессии и отображение SMILES.
+2. Добавить `/api/reference-matches` в основной Node server: browser вызывает
+   только основной API, тот вызывает reference service с `SERVICE_TOKEN`.
+3. Отключить direct reference search в production profile и не хранить
+   `SERVICE_TOKEN` в браузере.
+4. Передать reference service на отдельный домен/Docker volume, включить
+   Cloudflare Access для admin UI и ограничить доступ к search API только
+   основным FTIR server.
