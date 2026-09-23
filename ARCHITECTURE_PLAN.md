@@ -1,7 +1,7 @@
 # План переделки архитектуры FTIR Analyzer
 
 Дата создания: 2026-09-13
-Последнее обновление: 2026-09-18
+Последнее обновление: 2026-09-23
 Статус: базовые этапы 1–4 реализованы; detector, baseline, привязка пиков к спектрам, comparison matrix и LLM-пайплайн работают. Следующий приоритет — выделить LLM-слой из `server.js`, закрепить pipeline интеграционными тестами и затем подключать reference spectra.
 
 ## 0. Результат аудита текущей структуры
@@ -703,3 +703,126 @@ frontend/
   роли, LLM-ответ и provenance).
 - [ ] Финальная production-hardening документация: Cloudflare Access, CORS,
   rate limit, лимиты payload и мониторинг ошибок.
+
+## 15. Решение: отдельный сервис эталонных спектров Zenodo
+
+Принятое направление: reference spectra не встраиваются в основной FTIR
+server, а развиваются как отдельный Docker-сервис и отдельный репозиторий,
+например `ftir-reference-service`. Для него выделяется собственный домен.
+Основной FTIR Analyzer продолжает отвечать за загрузку, обработку спектров,
+пики и LLM-анализ; reference service отвечает только за каталог, индекс и
+математический поиск похожих эталонов.
+
+```text
+Static FTIR frontend
+        |
+        | POST /api/reference-matches (без ключей в браузере)
+        v
+Основной FTIR server ---- service token ----> Reference spectra service
+                                                  |
+                                                  +--> Zenodo data volume + index
+                                                  +--> admin UI / jobs / logs
+```
+
+Frontend не должен обращаться к reference service напрямую: это потребовало бы
+открыть CORS и хранить/передавать секрет в статичной странице. Основной FTIR
+server будет проксировать только разрешённый запрос поиска и хранить
+`REFERENCE_SERVICE_URL` и `REFERENCE_SERVICE_TOKEN` в своём `.env`.
+
+### Репозиторий и хранение данных
+
+```text
+ftir-reference-service/
+  app/                   # FastAPI: search, admin, jobs
+  worker/                # скачивание, проверка, распаковка, построение индекса
+  contracts/             # схемы request/response
+  tests/
+  docker-compose.yml
+  README.md
+  data/                  # только локальный volume, в Git не попадает
+```
+
+- Реализация: Python + FastAPI, NumPy/SciPy; метаданные в SQLite/DuckDB;
+  векторный индекс как отдельный сменяемый слой.
+- Данные, временные архивы, индекс и журналы находятся в Docker volume или
+  указанной внешней папке `REFERENCE_DATA_DIR`; они не входят в image и Git.
+- В manifest фиксируются DOI, версия набора, URL, лицензия, checksums, дата
+  загрузки и версия алгоритма индекса. Результат всегда помечается как
+  `computed reference`, а не экспериментальное подтверждение вещества.
+- Перед загрузкой интерфейс показывает требуемое место на диске: закладывать
+  минимум 20 GB на архив, распаковку, временные файлы и индекс.
+
+### Первый запуск без ручной работы в терминале
+
+1. Контейнер стартует в состоянии `uninitialized`; `/health` доступен, поиск
+   возвращает понятный статус `reference_dataset_not_ready`.
+2. Защищённая страница Admin показывает: размер, источник Zenodo, лицензию,
+   путь хранения, свободное место и кнопку «Download and build index».
+3. По подтверждению создаётся фоновое задание: `download → verify → extract →
+   build index → validate → ready`. Скачивание ведётся в `.part`, чтобы его
+   можно было продолжить после перезапуска.
+4. В интерфейсе видны прогресс, текущий этап, последние строки лога и понятная
+   ошибка. Архив не удаляется автоматически: это отдельное управляемое действие.
+5. После готовности сервис отвечает на API, а поиск не блокирует интерфейс
+   долгими задачами индексации.
+
+### API v1
+
+- `GET /health` — состояние `uninitialized | downloading | indexing | ready |
+  failed`, версия каталога и индекса.
+- `POST /api/v1/search` — нормализованный пользовательский спектр, диапазон,
+  preprocessing и `topK`; ответ: кандидаты, score, локальные совпадения,
+  SMILES, provenance, источник и лицензия.
+- `GET /api/v1/references/:id` — метаданные и downsample-кривая выбранного
+  эталона для наложения на график.
+- `GET /api/admin/status`, `POST /api/admin/setup`,
+  `GET /api/admin/jobs/:id`, `GET /api/admin/logs` — закрытые операции
+  первичной установки, прогресса и диагностики.
+
+Админские маршруты должны быть закрыты Cloudflare Access либо отдельным
+админ-токеном. Между основным FTIR server и сервисом используется отдельный
+service token. Публично можно оставить только `GET /health` с минимумом
+информации.
+
+### Порядок реализации
+
+1. Создать отдельный пустой GitHub-репозиторий и домен для сервиса.
+2. Поднять Docker skeleton с `/health`, защищённой Admin-страницей, volume,
+   jobs и логами — без датасета.
+3. Реализовать загрузку Zenodo по manifest, возобновление, checksum,
+   распаковку и понятный первый запуск.
+4. Реализовать нормализацию спектра и воспроизводимый baseline ranking
+   (cosine + correlation + derivative distance) на небольшой тестовой части
+   набора.
+5. Построить полный offline-index и `POST /api/v1/search`.
+6. Подключить proxy endpoint в основном FTIR server и только затем добавить
+   в клиент «Find reference matches» и наложение top-K эталонов.
+7. Передавать top-K в LLM только как дополнительное evidence, никогда как
+   автоматически подтверждённую идентификацию или доказательство реакции.
+
+## 16. Решение: пользовательский runtime profile для static frontend
+
+`config.js` больше не является местом для пользовательских URL, токенов или
+параметров модели. Он остаётся versioned-файлом с безопасными defaults,
+локализацией, зонами графика и выбором стартового режима по origin.
+
+`settings.js` создаёт профиль `ftir_user_profile_v1` в `localStorage` текущего
+origin. Профиль включает режим `development`/`production`, URL analysis,
+detector и reference API, transport credentials, provider/model LLM, личный
+AI key, analysis access token, reference service token и feature flags.
+
+- На `file://`/localhost стартовый режим — `development`; на публичном домене
+  — `production`.
+- Прямой browser → reference service разрешён только в development и только
+  как диагностический путь. Production использует основной FTIR server proxy.
+- Экспорт без ключей является обычным переносимым JSON. Экспорт с ключами
+  требует пароль и шифруется AES-GCM с PBKDF2-SHA-256.
+- Рабочая FTIR-сессия, CSV и Git никогда не включают user profile или ключи.
+- Поля personal provider/model/key используют server только при
+  `BYOK_ENABLED=true`; ключ передаётся единожды в HTTP header, не включается
+  в логи и не сохраняется server-side. Без BYOK server продолжает использовать
+  provider/key из своего `.env`.
+
+Следующая работа после проверки пользовательского профиля: добавить proxy
+`/api/reference-matches` в основной FTIR server, затем перенести reference UI
+из локального diagnostic-режима в production flow.

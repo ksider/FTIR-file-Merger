@@ -27,6 +27,7 @@
       <div class="topbar-form toolbar">
         <input id="files" type="file" accept=".txt,.jdx,.dx,.jsm,.jcm,.csv,text/plain,application/octet-stream" multiple style="display:none;">
         <input id="importSessionInput" type="file" accept=".json" style="display:none;">
+        <input id="importUserSettingsInput" type="file" accept=".json,application/json" style="display:none;">
         <div class="toolbar-group">
           <button id="selectFiles" class="icon-btn primary" type="button" title="Add files" aria-label="Add files">
             <span class="material-symbols-outlined">computer_arrow_up</span>
@@ -48,6 +49,9 @@
           </button>
           <button id="saveCsv" class="icon-btn success" type="button" title="Save CSV" aria-label="Save CSV">
             <span class="material-symbols-outlined">save</span>
+          </button>
+          <button id="openAppSettings" class="icon-btn" type="button" title="Application settings" aria-label="Application settings">
+            <span class="material-symbols-outlined">settings</span>
           </button>
         </div>
         <div class="toolbar-group name-group">
@@ -191,6 +195,7 @@
             <button id="copyStripes" type="button" class="btn tonal" data-i18n="copyStripes">Copy table</button>
             <button id="copyConfirmedPayload" type="button" class="btn tonal">Copy confirmed JSON</button>
             <button id="analyzeConfirmed" type="button" class="btn primary">Analyze confirmed</button>
+            <button id="searchLocalReferences" type="button" class="btn tonal" hidden data-i18n="findReferenceMatches">Find reference matches (local)</button>
           </div>
           <label class="analysis-prompt-field" for="analysisPrompt">
             <span data-i18n="analysisPromptLabel">Additional analysis context (optional)</span>
@@ -297,6 +302,65 @@
       </div>
       <div id="analysisResult" class="analysis-result" aria-live="polite"></div>
     </div>
+    <div class="card surface analysis-card reference-card" id="referenceSearchCard" hidden>
+      <div class="peaks-header">
+        <h3 data-i18n="referenceMatchesTitle">Reference matches</h3>
+        <span id="referenceSearchStatus" class="analysis-status"></span>
+      </div>
+      <div id="referenceSearchResult" class="analysis-result" aria-live="polite"></div>
+    </div>
+    <dialog id="appSettingsDialog" class="app-settings-dialog">
+      <form id="appSettingsForm" method="dialog">
+        <div class="dialog-header">
+          <div>
+            <div class="eyebrow" data-i18n="settingsEyebrow">Local profile</div>
+            <h3 data-i18n="settingsTitle">Application settings</h3>
+          </div>
+          <button id="closeAppSettings" class="icon-btn" type="button" aria-label="Close settings">×</button>
+        </div>
+        <p class="settings-note" data-i18n="settingsSecretNote">Settings are stored only in this browser. Do not import an untrusted settings file.</p>
+        <fieldset class="settings-fieldset">
+          <legend data-i18n="settingsModeTitle">Mode</legend>
+          <label for="settingsMode"><span data-i18n="settingsMode">Runtime mode</span>
+            <select id="settingsMode"><option value="development" data-i18n="settingsDevelopment">Development</option><option value="production" data-i18n="settingsProduction">Production</option></select>
+          </label>
+        </fieldset>
+        <fieldset class="settings-fieldset">
+          <legend data-i18n="settingsConnectionsTitle">Service connections</legend>
+          <div class="settings-grid">
+            <label for="settingsAnalysisApi"><span data-i18n="settingsAnalysisApi">Analysis API URL</span><input id="settingsAnalysisApi" type="url" inputmode="url" placeholder="https://…/api/analyze"></label>
+            <label for="settingsPeakApi"><span data-i18n="settingsPeakApi">Peak detector API URL</span><input id="settingsPeakApi" type="url" inputmode="url" placeholder="https://…/api/peaks/detect"></label>
+            <label for="settingsReferenceApi"><span data-i18n="settingsReferenceApi">Reference search API URL</span><input id="settingsReferenceApi" type="url" inputmode="url" placeholder="http://127.0.0.1:8088/api/v1/search"></label>
+            <label for="settingsApiCredentials"><span data-i18n="settingsCredentials">API credentials</span><select id="settingsApiCredentials"><option value="omit" data-i18n="settingsCredentialsOmit">Do not send cookies</option><option value="include" data-i18n="settingsCredentialsInclude">Send cookies</option></select></label>
+          </div>
+          <label class="settings-check" for="settingsDirectReference"><input id="settingsDirectReference" type="checkbox"><span data-i18n="settingsDirectReference">Enable direct local reference search</span></label>
+        </fieldset>
+        <fieldset class="settings-fieldset">
+          <legend data-i18n="settingsLlmTitle">LLM preferences</legend>
+          <p class="settings-note" data-i18n="settingsByokNote">A personal AI key is sent only to a server with BYOK explicitly enabled. It is never included in logs.</p>
+          <div class="settings-grid settings-grid--three">
+            <label for="settingsLlmProvider"><span data-i18n="settingsProvider">Provider</span><select id="settingsLlmProvider"><option value="server" data-i18n="settingsProviderServer">Server default</option><option value="gemini">Gemini</option><option value="mistral">Mistral</option><option value="mock">Mock</option></select></label>
+            <label for="settingsLlmModel"><span data-i18n="settingsModel">Model</span><input id="settingsLlmModel" type="text" maxlength="256"></label>
+            <label for="settingsLlmApiKey"><span data-i18n="settingsLlmApiKey">Personal AI API key</span><input id="settingsLlmApiKey" type="password" autocomplete="off" maxlength="2048"></label>
+          </div>
+        </fieldset>
+        <fieldset class="settings-fieldset">
+          <legend data-i18n="settingsTokensTitle">Access tokens</legend>
+          <p class="settings-note settings-token-note"><span data-i18n="settingsTokenHelp">Reference token is SERVICE_TOKEN from the reference-service .env. The analysis token is needed only if your own analysis API requires Bearer authentication.</span> <a href="https://github.com/ksider/ftir-reference-service" target="_blank" rel="noopener" data-i18n="settingsReferenceRepoLink">Reference service repository</a> · <a href="https://github.com/ksider/FTIR-file-Merger/tree/main/server" target="_blank" rel="noopener" data-i18n="settingsAnalysisRepoLink">Analysis server repository</a></p>
+          <div class="settings-grid">
+            <label for="settingsAnalysisToken"><span data-i18n="settingsAnalysisToken">Optional Bearer token for analysis API</span><input id="settingsAnalysisToken" type="password" autocomplete="off" maxlength="2048"></label>
+            <label for="settingsReferenceToken"><span data-i18n="settingsReferenceToken">SERVICE_TOKEN from reference service .env</span><input id="settingsReferenceToken" type="password" autocomplete="off" maxlength="2048"></label>
+          </div>
+        </fieldset>
+        <div class="settings-actions">
+          <button id="exportUserSettings" type="button" class="btn tonal" data-i18n="settingsExport">Export without keys</button>
+          <button id="exportUserSettingsWithSecrets" type="button" class="btn tonal" data-i18n="settingsExportSecrets">Export encrypted keys</button>
+          <button id="importUserSettings" type="button" class="btn tonal" data-i18n="settingsImport">Import settings</button>
+          <button id="resetUserSettings" type="button" class="btn danger" data-i18n="settingsReset">Reset profile</button>
+          <button type="submit" class="btn primary" data-i18n="settingsSave">Save and reload</button>
+        </div>
+      </form>
+    </dialog>
     <footer class="footer surface">
       <div class="footer-links">
         <a id="footerSite" href="#" rel="noopener" target="_blank">nikolaysemenov.ru</a>
@@ -309,6 +373,7 @@
   </div>
 
   <script src="./config.js"></script>
+  <script src="./settings.js"></script>
   <script src="./peak-db.js"></script>
   <script src="./app.js"></script>
 

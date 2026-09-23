@@ -93,8 +93,31 @@ LLM используется для интерпретации изменени�
 уточняющий вопрос. Он ограничен 2000 символами и не может переопределить
 измеренные пики, их `spectrumId` или серверную матрицу изменений.
 Backend ограничивает размер запросов, количество запросов и время ожидания
-провайдера. API-ключи никогда не сохраняются во frontend или экспортируемую
-сессию.
+провайдера. Рабочая FTIR-сессия не содержит API-ключей.
+
+## Пользовательский профиль и конфигурация
+
+Кнопка `settings` в верхней панели открывает локальный пользовательский
+профиль. В нём задаются режим `development`/`production`, URL сервисов,
+provider/model LLM, токены доступа и локальный reference service. Профиль
+хранится в `localStorage` конкретного origin и не попадает в Git, CSV или
+экспорт рабочей FTIR-сессии.
+
+- `Export without keys` создаёт переносимый JSON без секретов.
+- `Export encrypted keys` просит пароль и создаёт AES-GCM-зашифрованный JSON.
+- `Import settings` принимает оба вида профиля; для зашифрованного требуется
+  пароль.
+
+`config.js` содержит только безопасные defaults, i18n и параметры графика.
+На `localhost`/`file://` новый профиль начинается в `development`; на
+опубликованном домене — в `production`. Прямой browser → reference service
+доступен только в development. В production reference search должен идти через
+основной FTIR server, чтобы токен не попадал в браузер.
+
+Поле personal AI API key работает только если основной server запущен с
+`BYOK_ENABLED=true`. Ключ передаётся в заголовке одного запроса, не сохраняется
+на server и не включается в его логи. При `BYOK_ENABLED=false` server использует
+обычный provider/key из своего `.env`.
 
 ## Структура проекта
 
@@ -103,7 +126,8 @@ Backend ограничивает размер запросов, количест
 ├── index.html                  # HTML оболочка frontend
 ├── app.js                      # загрузка файлов, график, пики, сессии, API
 ├── styles.css                  # стили интерфейса
-├── config.js                   # API URL, языки, зоны и ссылки
+├── config.js                   # безопасные defaults, языки, зоны и ссылки
+├── settings.js                 # localStorage-профиль, import/export, runtime config
 ├── d3.min.js                   # локальная копия D3.js
 ├── jcampconverter.min.js       # локальный JCAMP-конвертер
 ├── peak-db.js                  # база подсказок по полосам
@@ -172,14 +196,9 @@ python3 -m http.server 8000
 
 Открой `http://127.0.0.1:8000`.
 
-URL backend задаётся в `config.js`:
-
-```js
-analysisApi: 'http://127.0.0.1:8787/api/analyze'
-```
-
-URL детектора пиков выводится из этого адреса автоматически:
-`/api/peaks/detect`.
+URL backend задаётся в `settings` внутри приложения и сохраняется только в
+браузере. Для нового локального профиля используются
+`http://127.0.0.1:8787/api/analyze` и `/api/peaks/detect`.
 
 Если frontend и backend находятся на разных origin, в backend нужно указать:
 

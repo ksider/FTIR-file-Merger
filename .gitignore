@@ -4,6 +4,9 @@
 server/.env
 server/.env.*
 !server/.env.example
+# Separate nested Git repository; managed and pushed independently.
+ftir-reference-service/
+ftir-settings*.json
 node_modules/
 *.log
 .DS_Store

@@ -1,11 +1,19 @@
 (() => {
-  const config = window.APP_CONFIG || {};
+  const config = window.APP_RUNTIME_CONFIG || window.APP_CONFIG || {};
   const translations = config.translations || {};
   const supportedLangs = config.supportedLangs || Object.keys(translations) || ['en'];
   const footerLinks = config.footerLinks || {};
   const chartSettings = config.chart || {};
   const analysisApi = config.analysisApi || '/api/analyze';
   const peakDetectionApi = config.peakDetectionApi || analysisApi.replace(/\/api\/analyze$/, '/api/peaks/detect');
+  const referenceSearchConfig = config.referenceSearch || {};
+  const userProfile = config.userProfile || {};
+  const userAuth = userProfile.auth || {};
+  const userLlm = userProfile.llm || {};
+  const referenceSearchEnabled = Boolean(referenceSearchConfig.enabled && referenceSearchConfig.api);
+  const referenceSearchApi = referenceSearchConfig.api || '';
+  const referenceSearchTopK = Math.min(Math.max(Number(referenceSearchConfig.topK) || 5, 1), 20);
+  const referenceSearchTimeoutMs = Math.min(Math.max(Number(referenceSearchConfig.timeoutMs) || 30000, 1000), 120000);
   const apiHostname = new URL(analysisApi, window.location.href).hostname;
   const localApi = apiHostname === 'localhost' || apiHostname === '127.0.0.1' || apiHostname === '::1';
   // Disk pages and a local API use wildcard CORS and must not send cookies.
@@ -92,14 +100,38 @@
   const copyStripesBtn = document.getElementById('copyStripes');
   const copyConfirmedPayloadBtn = document.getElementById('copyConfirmedPayload');
   const analyzeConfirmedBtn = document.getElementById('analyzeConfirmed');
+  const searchLocalReferencesBtn = document.getElementById('searchLocalReferences');
   const analysisPromptInput = document.getElementById('analysisPrompt');
   const analysisCard = document.getElementById('analysisCard');
   const analysisStatus = document.getElementById('analysisStatus');
   const analysisResult = document.getElementById('analysisResult');
+  const referenceSearchCard = document.getElementById('referenceSearchCard');
+  const referenceSearchStatus = document.getElementById('referenceSearchStatus');
+  const referenceSearchResult = document.getElementById('referenceSearchResult');
   const exportSessionBtn = document.getElementById('exportSession');
   const importSessionBtn = document.getElementById('importSession');
   const importSessionInput = document.getElementById('importSessionInput');
   const clearLocalSessionBtn = document.getElementById('clearLocalSession');
+  const openAppSettingsBtn = document.getElementById('openAppSettings');
+  const appSettingsDialog = document.getElementById('appSettingsDialog');
+  const appSettingsForm = document.getElementById('appSettingsForm');
+  const closeAppSettingsBtn = document.getElementById('closeAppSettings');
+  const importUserSettingsBtn = document.getElementById('importUserSettings');
+  const importUserSettingsInput = document.getElementById('importUserSettingsInput');
+  const exportUserSettingsBtn = document.getElementById('exportUserSettings');
+  const exportUserSettingsWithSecretsBtn = document.getElementById('exportUserSettingsWithSecrets');
+  const resetUserSettingsBtn = document.getElementById('resetUserSettings');
+  const settingsMode = document.getElementById('settingsMode');
+  const settingsAnalysisApi = document.getElementById('settingsAnalysisApi');
+  const settingsPeakApi = document.getElementById('settingsPeakApi');
+  const settingsReferenceApi = document.getElementById('settingsReferenceApi');
+  const settingsApiCredentials = document.getElementById('settingsApiCredentials');
+  const settingsDirectReference = document.getElementById('settingsDirectReference');
+  const settingsLlmProvider = document.getElementById('settingsLlmProvider');
+  const settingsLlmModel = document.getElementById('settingsLlmModel');
+  const settingsLlmApiKey = document.getElementById('settingsLlmApiKey');
+  const settingsAnalysisToken = document.getElementById('settingsAnalysisToken');
+  const settingsReferenceToken = document.getElementById('settingsReferenceToken');
   const selectFilesBtn = document.getElementById('selectFiles');
   const stripeSetBtns = document.querySelectorAll('.stripe-set-btn');
   const peakDb = Array.isArray(window.FTIR_BASE) ? window.FTIR_BASE : [];
@@ -173,7 +205,10 @@ let showPoints = false;
 let panRaf = null;
 let panQueued = null;
 let measurementState = null;
-let analysisData = null;
+  let analysisData = null;
+  // Local-only token for the direct diagnostic route. It is intentionally not
+  // saved in config.js, localStorage or the exported session.
+  let localReferenceServiceToken = userAuth.referenceServiceToken || '';
 const LOCAL_SESSION_KEY = 'ftir_merger_local_session_v1';
 const LOCAL_SETTINGS_KEY = 'ftir_merger_settings_v1';
 let localSaveTimer = null;
@@ -183,6 +218,7 @@ let localSaveTimer = null;
     pageOrigin: window.location.origin,
     analysisApi,
     peakDetectionApi,
+    referenceSearch: referenceSearchEnabled ? referenceSearchApi : 'disabled',
     apiCredentials,
     language: currentLang,
     debugLogging: DEBUG_LOGGING,
@@ -214,6 +250,28 @@ let localSaveTimer = null;
     const fallback = (translations.en || {})[key] || key;
     const resolved = typeof val === 'function' ? val(arg) : val;
     return resolved !== undefined ? resolved : fallback;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function apiRequestHeaders({ includeLlmPreferences = false } = {}) {
+    const headers = { 'content-type': 'application/json' };
+    if (userAuth.analysisAccessToken) headers.authorization = `Bearer ${userAuth.analysisAccessToken}`;
+    // These headers are accepted only when the server is deliberately started
+    // with BYOK_ENABLED=true. They are never written to console logs.
+    if (includeLlmPreferences && userLlm.provider && userLlm.provider !== 'server') {
+      headers['x-ftir-llm-provider'] = userLlm.provider;
+      if (userLlm.model) headers['x-ftir-llm-model'] = userLlm.model;
+      if (userLlm.apiKey) headers['x-ftir-llm-api-key'] = userLlm.apiKey;
+    }
+    return headers;
   }
 
   function applyTranslations() {
@@ -1844,6 +1902,15 @@ let localSaveTimer = null;
       detectorBaselineSummary.textContent = `${t('detectorBaseline')}: ${hasAppliedBaseline ? selectedMethod.toUpperCase() : t('detectorRawMode')}`;
       detectorBaselineSummary.classList.toggle('is-applied', hasAppliedBaseline);
     }
+    updateReferenceSearchControls();
+  }
+
+  function updateReferenceSearchControls() {
+    if (!searchLocalReferencesBtn) return;
+    searchLocalReferencesBtn.hidden = !referenceSearchEnabled;
+    if (!searchLocalReferencesBtn.dataset.busy) {
+      searchLocalReferencesBtn.disabled = !referenceSearchEnabled || !activeSpectrumId || !lastSpectra.length;
+    }
   }
 
   function setActiveSpectrum(spectrumId) {
@@ -1975,7 +2042,7 @@ let localSaveTimer = null;
     try {
       response = await fetch(peakDetectionApi, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: apiRequestHeaders(),
         credentials: apiCredentials,
         body: JSON.stringify(payload),
       });
@@ -2706,6 +2773,10 @@ let localSaveTimer = null;
         prominenceChangeThreshold: 0.05,
         widthChangeThreshold: 1,
         userPrompt: analysisPromptInput?.value.trim().slice(0, 2000) || '',
+        clientPreferences: {
+          provider: userLlm.provider || 'server',
+          model: userLlm.model || '',
+        },
       },
     };
   }
@@ -3126,6 +3197,106 @@ let localSaveTimer = null;
     console.info('[FTIR analysis] suggestions.applied', { candidates: candidates.length, confirmed: confirmed.length, applied });
   }
 
+  function selectedReferenceSignalType(spectrum) {
+    const applied = detectorAppliedSettings.get(spectrum?.id);
+    const fromProcessing = applied?.signalType;
+    const fromControl = detectorSignalType?.value;
+    const configured = referenceSearchConfig.signalType;
+    return [fromProcessing, fromControl, spectrum?.signalType, configured]
+      .find((value) => value === 'absorbance' || value === 'transmittance') || 'transmittance';
+  }
+
+  function renderReferenceSearchResponse(body, spectrum) {
+    const matches = Array.isArray(body?.matches) ? body.matches : [];
+    if (!matches.length) return `<p class="analysis-empty">${escapeHtml(t('referenceNoMatches'))}</p>`;
+    const items = matches.map((match, index) => {
+      const score = Number.isFinite(Number(match.score)) ? Number(match.score).toFixed(4) : '—';
+      const identifier = match.id || `match-${index + 1}`;
+      const smiles = match.smiles ? `<div class="reference-match-meta">SMILES: ${escapeHtml(match.smiles)}</div>` : '';
+      const source = [match.source, match.sourceFile, match.license].filter(Boolean).join(' · ');
+      return `<article class="reference-match">
+        <div class="reference-match-head"><span class="analysis-rank">${index + 1}</span><strong>${escapeHtml(identifier)}</strong><span class="reference-match-score">${escapeHtml(t('referenceScore'))}: ${escapeHtml(score)}</span></div>
+        ${smiles}<div class="reference-match-meta">${escapeHtml(source)}</div>
+      </article>`;
+    }).join('');
+    const spectrumName = customNames.get(spectrumColumn(spectrum.id)) || spectrum.name || spectrum.id;
+    const limitations = Array.isArray(body?.limitations) ? body.limitations : [];
+    return `<div class="reference-match-list">${items}</div>
+      <p class="reference-match-note"><strong>${escapeHtml(t('referenceComputed'))}.</strong> ${escapeHtml(spectrumName)} · ${escapeHtml(body?.catalogVersion || '')}</p>
+      ${limitations.map((item) => `<p class="reference-match-note">${escapeHtml(item)}</p>`).join('')}`;
+  }
+
+  async function searchLocalReferences() {
+    const spectrum = lastSpectra.find((item) => item.id === activeSpectrumId);
+    if (!spectrum?.points?.length) {
+      setStatus(t('referenceNoSpectrum'), true);
+      return;
+    }
+    if (!localReferenceServiceToken) {
+      localReferenceServiceToken = window.prompt(t('referenceTokenPrompt'))?.trim() || '';
+      if (localReferenceServiceToken && window.FTIR_SETTINGS?.update) {
+        window.FTIR_SETTINGS.update({ auth: { referenceServiceToken: localReferenceServiceToken } });
+      }
+    }
+    if (!localReferenceServiceToken) {
+      setStatus(t('referenceTokenRequired'), true);
+      return;
+    }
+    if (referenceSearchCard) referenceSearchCard.hidden = false;
+    if (referenceSearchStatus) referenceSearchStatus.textContent = t('referenceSearching');
+    if (referenceSearchResult) referenceSearchResult.textContent = '';
+    if (searchLocalReferencesBtn) {
+      searchLocalReferencesBtn.dataset.busy = 'true';
+      searchLocalReferencesBtn.disabled = true;
+    }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), referenceSearchTimeoutMs);
+    const signalType = selectedReferenceSignalType(spectrum);
+    const payload = { points: spectrum.points, signalType, topK: referenceSearchTopK };
+    const startedAt = performance.now();
+    clientLog('reference.search.start', {
+      url: referenceSearchApi,
+      spectrumId: spectrum.id,
+      points: spectrum.points.length,
+      signalType,
+      topK: referenceSearchTopK,
+    });
+    try {
+      const response = await fetch(referenceSearchApi, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-service-token': localReferenceServiceToken },
+        credentials: 'omit',
+        signal: controller.signal,
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 401) localReferenceServiceToken = '';
+        throw new Error(body.detail || body.error || `Reference search failed (${response.status})`);
+      }
+      if (referenceSearchStatus) referenceSearchStatus.textContent = t('referenceReady');
+      if (referenceSearchResult) referenceSearchResult.innerHTML = renderReferenceSearchResponse(body, spectrum);
+      clientLog('reference.search.complete', {
+        spectrumId: spectrum.id,
+        matches: Array.isArray(body.matches) ? body.matches.length : 0,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      setStatus(t('referenceReady'));
+    } catch (error) {
+      const message = error?.name === 'AbortError' ? `Reference search timed out after ${referenceSearchTimeoutMs / 1000}s` : error.message;
+      if (referenceSearchStatus) referenceSearchStatus.textContent = t('referenceUnavailable');
+      if (referenceSearchResult) referenceSearchResult.textContent = message || t('referenceUnavailable');
+      clientError('reference.search.error', { url: referenceSearchApi, name: error.name, message });
+      setStatus(t('referenceUnavailable'), true);
+    } finally {
+      window.clearTimeout(timeout);
+      if (searchLocalReferencesBtn) {
+        delete searchLocalReferencesBtn.dataset.busy;
+        updateReferenceSearchControls();
+      }
+    }
+  }
+
   async function analyzeConfirmedPeaks() {
     const payload = buildConfirmedPeaksPayload();
     if (!payload.confirmedPeakIds.length) {
@@ -3147,7 +3318,7 @@ let localSaveTimer = null;
       const startedAt = performance.now();
       const response = await fetch(analysisApi, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: apiRequestHeaders({ includeLlmPreferences: true }),
         credentials: apiCredentials,
         body: JSON.stringify(payload),
       });
@@ -3418,10 +3589,131 @@ let localSaveTimer = null;
     updateDetectorControls();
   }
 
+  function currentUserProfile() {
+    return window.FTIR_SETTINGS?.get?.() || userProfile;
+  }
+
+  function populateAppSettings(profile = currentUserProfile()) {
+    if (!profile) return;
+    if (settingsMode) settingsMode.value = profile.mode || 'development';
+    if (settingsAnalysisApi) settingsAnalysisApi.value = profile.connections?.analysisApi || '';
+    if (settingsPeakApi) settingsPeakApi.value = profile.connections?.peakDetectionApi || '';
+    if (settingsReferenceApi) settingsReferenceApi.value = profile.connections?.referenceSearchApi || '';
+    if (settingsApiCredentials) settingsApiCredentials.value = profile.connections?.apiCredentials === 'include' ? 'include' : 'omit';
+    if (settingsDirectReference) settingsDirectReference.checked = Boolean(profile.features?.directReferenceSearch);
+    if (settingsLlmProvider) settingsLlmProvider.value = profile.llm?.provider || 'server';
+    if (settingsLlmModel) settingsLlmModel.value = profile.llm?.model || '';
+    if (settingsLlmApiKey) settingsLlmApiKey.value = profile.llm?.apiKey || '';
+    if (settingsAnalysisToken) settingsAnalysisToken.value = profile.auth?.analysisAccessToken || '';
+    if (settingsReferenceToken) settingsReferenceToken.value = profile.auth?.referenceServiceToken || '';
+  }
+
+  function profileFromSettingsForm() {
+    const current = currentUserProfile();
+    return {
+      ...current,
+      mode: settingsMode?.value || current.mode,
+      connections: {
+        ...current.connections,
+        analysisApi: settingsAnalysisApi?.value.trim() || '',
+        peakDetectionApi: settingsPeakApi?.value.trim() || '',
+        referenceSearchApi: settingsReferenceApi?.value.trim() || '',
+        apiCredentials: settingsApiCredentials?.value === 'include' ? 'include' : 'omit',
+      },
+      llm: {
+        ...current.llm,
+        provider: settingsLlmProvider?.value || 'server',
+        model: settingsLlmModel?.value.trim() || '',
+        apiKey: settingsLlmApiKey?.value.trim() || '',
+      },
+      auth: {
+        ...current.auth,
+        analysisAccessToken: settingsAnalysisToken?.value.trim() || '',
+        referenceServiceToken: settingsReferenceToken?.value.trim() || '',
+      },
+      features: {
+        ...current.features,
+        directReferenceSearch: Boolean(settingsDirectReference?.checked),
+      },
+    };
+  }
+
+  function downloadSettingsFile(settingsDocument, filename) {
+    const blob = new Blob([JSON.stringify(settingsDocument, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function openAppSettings() {
+    if (!appSettingsDialog) return;
+    populateAppSettings();
+    appSettingsDialog.showModal();
+  }
+
+  async function exportUserSettings(includeSecrets) {
+    try {
+      const password = includeSecrets ? window.prompt(t('settingsExportPassword')) : '';
+      if (includeSecrets && !password) return;
+      const document = await window.FTIR_SETTINGS.makeExport(includeSecrets, password);
+      downloadSettingsFile(document, includeSecrets ? 'ftir-settings-encrypted.json' : 'ftir-settings.json');
+    } catch (error) {
+      setStatus(error.message || 'Settings export failed.', true);
+    }
+  }
+
+  async function importUserSettings(file) {
+    if (!file) return;
+    try {
+      const document = JSON.parse(await file.text());
+      const password = document?.kind === 'ftir-user-settings-encrypted'
+        ? window.prompt(t('settingsImportPassword'))
+        : '';
+      if (document?.kind === 'ftir-user-settings-encrypted' && !password) return;
+      window.FTIR_SETTINGS.importDocument(document, password);
+      setStatus(t('settingsImported'));
+      window.setTimeout(() => window.location.reload(), 250);
+    } catch (error) {
+      setStatus(error.message || 'Settings import failed.', true);
+    } finally {
+      if (importUserSettingsInput) importUserSettingsInput.value = '';
+    }
+  }
+
   refreshBtn.addEventListener('click', () => {
     if (lastData) {
       renderChartFromData(lastData);
     }
+  });
+
+  openAppSettingsBtn?.addEventListener('click', openAppSettings);
+  closeAppSettingsBtn?.addEventListener('click', () => appSettingsDialog?.close());
+  appSettingsForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    try {
+      window.FTIR_SETTINGS.save(profileFromSettingsForm());
+      setStatus(t('settingsSaved'));
+      appSettingsDialog?.close();
+      window.setTimeout(() => window.location.reload(), 250);
+    } catch (error) {
+      setStatus(error.message || 'Settings save failed.', true);
+    }
+  });
+  exportUserSettingsBtn?.addEventListener('click', () => { void exportUserSettings(false); });
+  exportUserSettingsWithSecretsBtn?.addEventListener('click', () => { void exportUserSettings(true); });
+  importUserSettingsBtn?.addEventListener('click', () => importUserSettingsInput?.click());
+  importUserSettingsInput?.addEventListener('change', () => { void importUserSettings(importUserSettingsInput.files?.[0]); });
+  resetUserSettingsBtn?.addEventListener('click', () => {
+    if (!window.confirm('Reset this browser profile? Imported service URLs and all local tokens will be removed.')) return;
+    window.FTIR_SETTINGS.reset();
+    setStatus(t('settingsSaved'));
+    appSettingsDialog?.close();
+    window.setTimeout(() => window.location.reload(), 250);
   });
 
   spectrumSettingsForm?.addEventListener('submit', (event) => {
@@ -3758,6 +4050,7 @@ let localSaveTimer = null;
   });
 
   analyzeConfirmedBtn?.addEventListener('click', analyzeConfirmedPeaks);
+  searchLocalReferencesBtn?.addEventListener('click', searchLocalReferences);
   clearLocalSessionBtn?.addEventListener('click', clearLocalSession);
 
   const copyCurrentSvg = () => {
