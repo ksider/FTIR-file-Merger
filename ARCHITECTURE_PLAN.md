@@ -800,29 +800,29 @@ service token. Публично можно оставить только `GET /h
 7. Передавать top-K в LLM только как дополнительное evidence, никогда как
    автоматически подтверждённую идентификацию или доказательство реакции.
 
-## 16. Решение: пользовательский runtime profile для static frontend
 
-`config.js` больше не является местом для пользовательских URL, токенов или
-параметров модели. Он остаётся versioned-файлом с безопасными defaults,
-локализацией, зонами графика и выбором стартового режима по origin.
 
-`settings.js` создаёт профиль `ftir_user_profile_v1` в `localStorage` текущего
-origin. Профиль включает режим `development`/`production`, URL analysis,
-detector и reference API, transport credentials, provider/model LLM, личный
-AI key, analysis access token, reference service token и feature flags.
+///
 
-- На `file://`/localhost стартовый режим — `development`; на публичном домене
-  — `production`.
-- Прямой browser → reference service разрешён только в development и только
-  как диагностический путь. Production использует основной FTIR server proxy.
-- Экспорт без ключей является обычным переносимым JSON. Экспорт с ключами
-  требует пароль и шифруется AES-GCM с PBKDF2-SHA-256.
-- Рабочая FTIR-сессия, CSV и Git никогда не включают user profile или ключи.
-- Поля personal provider/model/key используют server только при
-  `BYOK_ENABLED=true`; ключ передаётся единожды в HTTP header, не включается
-  в логи и не сохраняется server-side. Без BYOK server продолжает использовать
-  provider/key из своего `.env`.
+Конфиги static site — сейчас.
+- Общий безопасный config.defaults.js.
+- Игнорируемый config.local.js для 127.0.0.1, debug и прямой local reference search.
+- Отдельный production runtime-config, который подставляется при деплое.
+- В production кнопка локального reference search выключена; запросы потом идут только через основной FTIR server.
 
-Следующая работа после проверки пользовательского профиля: добавить proxy
-`/api/reference-matches` в основной FTIR server, затем перенести reference UI
-из локального diagnostic-режима в production flow.
+UI анализатора.
+- Доработать уже появившийся блок совпадений.
+- Выбор результата и наложение нормализованного эталона на график.
+- Показ source/licence/computed-warning.
+- Не передавать совпадения в LLM автоматически.
+
+Админка reference service.
+- Проверка свободного места до 8 GB загрузки.
+- Более наглядный progress download/index.
+- Retry/cancel, история jobs, manifest/checksums.
+- Подготовка к отдельному домену и Cloudflare Access.
+
+Production bridge.
+- /api/reference-matches в основном FTIR server.
+- Service token остаётся между серверами.
+- UI работает через основной API, без CORS и токенов в браузере.
