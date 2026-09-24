@@ -3398,7 +3398,9 @@ let localSaveTimer = null;
       const response = await fetch(referenceMetadataApi, {
         method: 'POST',
         headers,
-        credentials: apiCredentials,
+        // Direct reference authentication uses X-Service-Token, not browser
+        // cookies. Omitting credentials keeps cross-origin CORS deterministic.
+        credentials: referenceSearchDirect ? 'omit' : apiCredentials,
         body: JSON.stringify({ smiles: match.smiles }),
       });
       const body = await response.json().catch(() => ({}));
@@ -3541,7 +3543,7 @@ let localSaveTimer = null;
       const response = await fetch(referenceSearchApi, {
         method: 'POST',
         headers,
-        credentials: apiCredentials,
+        credentials: referenceSearchDirect ? 'omit' : apiCredentials,
         signal: controller.signal,
         body: JSON.stringify(payload),
       });
