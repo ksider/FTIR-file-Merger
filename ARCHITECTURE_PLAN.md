@@ -697,8 +697,8 @@ frontend/
 ### Отложено
 
 - [ ] Настоящая миграция на React + Vite + Tailwind + shadcn/ui.
-- [ ] Reference spectra adapter, 8+ GB внешний датасет Zenodo, offline-index,
-  API поиска и UI наложения эталона.
+- [x] Reference spectra adapter: отдельный сервис, Zenodo offline-index,
+  API поиска и UI результатов с явно настраиваемым URL reference service.
 - [ ] Экспорт полного воспроизводимого отчёта (спектры, пики, preprocessing,
   роли, LLM-ответ и provenance).
 - [ ] Финальная production-hardening документация: Cloudflare Access, CORS,
@@ -714,20 +714,17 @@ server, а развиваются как отдельный Docker-сервис 
 математический поиск похожих эталонов.
 
 ```text
-Static FTIR frontend
-        |
-        | POST /api/reference-matches (без ключей в браузере)
-        v
-Основной FTIR server ---- service token ----> Reference spectra service
-                                                  |
-                                                  +--> Zenodo data volume + index
-                                                  +--> admin UI / jobs / logs
+Static FTIR frontend ---- configured URL + service token ----> Reference spectra service
+                                                                 |
+                                                                 +--> Zenodo data volume + index
+                                                                 +--> admin UI / jobs / logs
 ```
 
-Frontend не должен обращаться к reference service напрямую: это потребовало бы
-открыть CORS и хранить/передавать секрет в статичной странице. Основной FTIR
-server будет проксировать только разрешённый запрос поиска и хранить
-`REFERENCE_SERVICE_URL` и `REFERENCE_SERVICE_TOKEN` в своём `.env`.
+Reference service — отдельный endpoint, явно настраиваемый для каждой копии
+клиента. Его URL и `SERVICE_TOKEN` хранятся в localStorage пользовательского
+профиля; сервер должен разрешать CORS для домена клиента. Основной FTIR server
+сохраняет дополнительный proxy-маршрут для закрытых развёртываний, но клиент
+не подменяет URL reference service адресом сервера пиков или LLM.
 
 ### Репозиторий и хранение данных
 

@@ -79,7 +79,7 @@
       <div class="chart-tabs-row">
         <div id="chartLegend" class="spectrum-tabs nav nav-tabs" role="tablist" aria-label="Open spectra"></div>
         <div class="chart-actions">
-          <button id="searchLocalReferences" type="button" class="btn tonal chart-reference-search" hidden data-i18n="findReferenceMatches">Find reference matches (local)</button>
+          <button id="searchLocalReferences" type="button" class="btn tonal chart-reference-search" hidden data-i18n="findReferenceMatches">Find reference matches</button>
           <button id="openChartSettings" class="icon-btn chart-settings-trigger" type="button" title="Chart settings" aria-label="Chart settings" disabled>
             <span class="material-symbols-outlined">tune</span>
           </button>
@@ -344,7 +344,6 @@
             <label for="settingsReferenceApi"><span data-i18n="settingsReferenceApi">Reference search API URL</span><input id="settingsReferenceApi" type="url" inputmode="url" placeholder="http://127.0.0.1:8088/api/v1/search"></label>
             <label for="settingsApiCredentials"><span data-i18n="settingsCredentials">API credentials</span><select id="settingsApiCredentials"><option value="omit" data-i18n="settingsCredentialsOmit">Do not send cookies</option><option value="include" data-i18n="settingsCredentialsInclude">Send cookies</option></select></label>
           </div>
-          <label class="settings-check" for="settingsDirectReference"><input id="settingsDirectReference" type="checkbox"><span data-i18n="settingsDirectReference">Enable direct local reference search</span></label>
         </fieldset>
         <fieldset class="settings-fieldset">
           <legend data-i18n="settingsLlmTitle">LLM preferences</legend>

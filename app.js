@@ -12,7 +12,9 @@
   const userLlm = userProfile.llm || {};
   const referenceSearchEnabled = Boolean(referenceSearchConfig.enabled && referenceSearchConfig.api);
   const referenceSearchApi = referenceSearchConfig.api || '';
-  const referenceMetadataApi = referenceSearchApi.replace(/\/api\/v1\/search\/?(?:\?.*)?$/, '/api/v1/metadata/resolve');
+  const referenceSearchDirect = Boolean(referenceSearchConfig.direct);
+  const referenceMetadataApi = referenceSearchConfig.metadataApi
+    || referenceSearchApi.replace(/\/api\/v1\/search\/?(?:\?.*)?$/, '/api/v1/metadata/resolve');
   const referenceSearchTopK = Math.min(Math.max(Number(referenceSearchConfig.topK) || 5, 1), 20);
   const referenceSearchTimeoutMs = Math.min(Math.max(Number(referenceSearchConfig.timeoutMs) || 30000, 1000), 120000);
   const apiHostname = new URL(analysisApi, window.location.href).hostname;
@@ -129,7 +131,6 @@
   const settingsPeakApi = document.getElementById('settingsPeakApi');
   const settingsReferenceApi = document.getElementById('settingsReferenceApi');
   const settingsApiCredentials = document.getElementById('settingsApiCredentials');
-  const settingsDirectReference = document.getElementById('settingsDirectReference');
   const settingsLlmProvider = document.getElementById('settingsLlmProvider');
   const settingsLlmModel = document.getElementById('settingsLlmModel');
   const settingsLlmApiKey = document.getElementById('settingsLlmApiKey');
@@ -3392,10 +3393,12 @@ let localSaveTimer = null;
       if (keepSidebarOpen) setReferenceSidebarOpen(true);
     }
     try {
+      const headers = { 'content-type': 'application/json' };
+      if (referenceSearchDirect) headers['x-service-token'] = localReferenceServiceToken;
       const response = await fetch(referenceMetadataApi, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-service-token': localReferenceServiceToken },
-        credentials: 'omit',
+        headers,
+        credentials: apiCredentials,
         body: JSON.stringify({ smiles: match.smiles }),
       });
       const body = await response.json().catch(() => ({}));
@@ -3470,7 +3473,9 @@ let localSaveTimer = null;
     setReferenceSidebarVisible(true);
     setReferenceSidebarOpen(referenceSidebarOpen);
     if (referenceSearchSpectrum) referenceSearchSpectrum.textContent = referenceSpectrumName(spectrum);
-    if (referenceSearchStatus) referenceSearchStatus.textContent = entry.error ? t('referenceUnavailable') : t('referenceReady');
+    if (referenceSearchStatus) referenceSearchStatus.textContent = entry.error
+      ? t(referenceSearchDirect ? 'referenceUnavailable' : 'referenceProxyUnavailable')
+      : t('referenceReady');
     if (entry.error) {
       referenceSearchResult.textContent = entry.error;
       return;
@@ -3498,13 +3503,13 @@ let localSaveTimer = null;
       setStatus(t('referenceNoSpectrum'), true);
       return;
     }
-    if (!localReferenceServiceToken) {
+    if (referenceSearchDirect && !localReferenceServiceToken) {
       localReferenceServiceToken = window.prompt(t('referenceTokenPrompt'))?.trim() || '';
       if (localReferenceServiceToken && window.FTIR_SETTINGS?.update) {
         window.FTIR_SETTINGS.update({ auth: { referenceServiceToken: localReferenceServiceToken } });
       }
     }
-    if (!localReferenceServiceToken) {
+    if (referenceSearchDirect && !localReferenceServiceToken) {
       setStatus(t('referenceTokenRequired'), true);
       return;
     }
@@ -3528,18 +3533,21 @@ let localSaveTimer = null;
       points: spectrum.points.length,
       signalType,
       topK: referenceSearchTopK,
+      direct: referenceSearchDirect,
     });
     try {
+      const headers = { 'content-type': 'application/json' };
+      if (referenceSearchDirect) headers['x-service-token'] = localReferenceServiceToken;
       const response = await fetch(referenceSearchApi, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-service-token': localReferenceServiceToken },
-        credentials: 'omit',
+        headers,
+        credentials: apiCredentials,
         signal: controller.signal,
         body: JSON.stringify(payload),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
-        if (response.status === 401) localReferenceServiceToken = '';
+        if (referenceSearchDirect && response.status === 401) localReferenceServiceToken = '';
         throw new Error(body.detail || body.error || `Reference search failed (${response.status})`);
       }
       referenceSearchesBySpectrum.set(spectrum.id, { body, fetchedAt: new Date().toISOString() });
@@ -3553,10 +3561,11 @@ let localSaveTimer = null;
       setStatus(t('referenceReady'));
     } catch (error) {
       const message = error?.name === 'AbortError' ? `Reference search timed out after ${referenceSearchTimeoutMs / 1000}s` : error.message;
-      referenceSearchesBySpectrum.set(spectrum.id, { error: message || t('referenceUnavailable'), fetchedAt: new Date().toISOString() });
+      const unavailableMessage = t(referenceSearchDirect ? 'referenceUnavailable' : 'referenceProxyUnavailable');
+      referenceSearchesBySpectrum.set(spectrum.id, { error: message || unavailableMessage, fetchedAt: new Date().toISOString() });
       renderActiveReferenceSearch();
       clientError('reference.search.error', { url: referenceSearchApi, name: error.name, message });
-      setStatus(t('referenceUnavailable'), true);
+      setStatus(unavailableMessage, true);
     } finally {
       window.clearTimeout(timeout);
       if (searchLocalReferencesBtn) {
@@ -3869,7 +3878,6 @@ let localSaveTimer = null;
     if (settingsPeakApi) settingsPeakApi.value = profile.connections?.peakDetectionApi || '';
     if (settingsReferenceApi) settingsReferenceApi.value = profile.connections?.referenceSearchApi || '';
     if (settingsApiCredentials) settingsApiCredentials.value = profile.connections?.apiCredentials === 'include' ? 'include' : 'omit';
-    if (settingsDirectReference) settingsDirectReference.checked = Boolean(profile.features?.directReferenceSearch);
     if (settingsLlmProvider) settingsLlmProvider.value = profile.llm?.provider || 'server';
     if (settingsLlmModel) settingsLlmModel.value = profile.llm?.model || '';
     if (settingsLlmApiKey) settingsLlmApiKey.value = profile.llm?.apiKey || '';
@@ -3899,10 +3907,6 @@ let localSaveTimer = null;
         ...current.auth,
         analysisAccessToken: settingsAnalysisToken?.value.trim() || '',
         referenceServiceToken: settingsReferenceToken?.value.trim() || '',
-      },
-      features: {
-        ...current.features,
-        directReferenceSearch: Boolean(settingsDirectReference?.checked),
       },
     };
   }

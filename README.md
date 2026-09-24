@@ -131,9 +131,17 @@ provider/model LLM, токены доступа и локальный reference 
 
 `config.js` содержит только безопасные defaults, i18n и параметры графика.
 На `localhost`/`file://` новый профиль начинается в `development`; на
-опубликованном домене — в `production`. Прямой browser → reference service
-доступен только в development. В production reference search должен идти через
-основной FTIR server, чтобы токен не попадал в браузер.
+опубликованном домене — в `production`. Reference search — независимый
+сервис: каждая копия приложения обращается строго к URL, указанному в поле
+`Reference service search API URL`. Он никогда не выводится из URL сервера
+пиков или LLM. Токен reference service хранится в localStorage профиля;
+публичный reference service должен разрешать CORS для домена приложения и
+заголовок `X-Service-Token`.
+
+Основной FTIR server также поддерживает необязательный proxy-маршрут
+`/api/reference-matches` с `REFERENCE_SERVICE_URL` и
+`REFERENCE_SERVICE_TOKEN` в `.env`, но статичный клиент его автоматически не
+использует.
 
 Поле personal AI API key работает только если основной server запущен с
 `BYOK_ENABLED=true`. Ключ передаётся в заголовке одного запроса, не сохраняется

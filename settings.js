@@ -31,7 +31,6 @@
         referenceServiceToken: '',
       },
       features: {
-        directReferenceSearch: development,
         referenceSignalType: 'transmittance',
         referenceTopK: 5,
         referenceTimeoutMs: 30000,
@@ -65,9 +64,6 @@
         referenceServiceToken: stringValue(auth.referenceServiceToken, '', 2048),
       },
       features: {
-        directReferenceSearch: typeof features.directReferenceSearch === 'boolean'
-          ? features.directReferenceSearch
-          : base.features.directReferenceSearch,
         referenceSignalType: features.referenceSignalType === 'absorbance' ? 'absorbance' : 'transmittance',
         referenceTopK: Math.min(Math.max(Number(features.referenceTopK) || base.features.referenceTopK, 1), 20),
         referenceTimeoutMs: Math.min(Math.max(Number(features.referenceTimeoutMs) || base.features.referenceTimeoutMs, 1000), 120000),
@@ -177,6 +173,11 @@
   function resolvedConfig(baseConfig) {
     const profile = read();
     const analysisApi = profile.connections.analysisApi || '/api/analyze';
+    // Reference matching is an independent service. Never infer its URL from
+    // the peak/LLM server: every copy uses the exact URL configured by its user.
+    const referenceSearchApi = profile.connections.referenceSearchApi;
+    const directReferenceSearch = Boolean(referenceSearchApi);
+    const referenceMetadataApi = referenceSearchApi.replace(/\/api\/v1\/search\/?(?:\?.*)?$/, '/api/v1/metadata/resolve');
     return {
       ...baseConfig,
       environment: { ...(baseConfig.environment || {}), mode: profile.mode },
@@ -184,8 +185,10 @@
       peakDetectionApi: profile.connections.peakDetectionApi || analysisApi.replace(/\/api\/analyze$/, '/api/peaks/detect'),
       apiCredentials: profile.connections.apiCredentials,
       referenceSearch: {
-        enabled: Boolean(profile.mode === 'development' && profile.features.directReferenceSearch && profile.connections.referenceSearchApi),
-        api: profile.connections.referenceSearchApi,
+        enabled: Boolean(referenceSearchApi),
+        api: referenceSearchApi,
+        metadataApi: referenceMetadataApi,
+        direct: directReferenceSearch,
         signalType: profile.features.referenceSignalType,
         topK: profile.features.referenceTopK,
         timeoutMs: profile.features.referenceTimeoutMs,
