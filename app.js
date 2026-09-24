@@ -3557,7 +3557,11 @@ let localSaveTimer = null;
       void resolveStrongReferenceMetadata(spectrum.id);
       clientLog('reference.search.complete', {
         spectrumId: spectrum.id,
+        queryFingerprint: body.query?.fingerprint || null,
         matches: Array.isArray(body.matches) ? body.matches.length : 0,
+        topMatches: Array.isArray(body.matches)
+          ? body.matches.slice(0, 3).map((match) => ({ id: match.id, score: match.score }))
+          : [],
         durationMs: Math.round(performance.now() - startedAt),
       });
       setStatus(t('referenceReady'));
